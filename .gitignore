@@ -1,0 +1,14 @@
+.DS_Store
+.cursor/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+discovery.json
+report.csv
+node_modules/
+web/node_modules/
+web/.next/
+outputs/
+archive/
