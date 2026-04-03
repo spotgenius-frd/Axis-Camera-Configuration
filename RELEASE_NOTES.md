@@ -49,6 +49,3 @@ Typical use:
 - Username rename is not included in this release
 - Tailscale access is useful for routed remote reachability, but it should not be treated as local broadcast discovery
 
-### Jira-ready summary
-
-`v0.1.0` is the first GitHub-tracked baseline of the Axis Camera Configuration tool. The project currently supports local operator workflows for discovering Axis cameras on a customer LAN, reading camera state, changing passwords, changing single-camera network settings, applying bulk image/stream/time settings, managing stream profiles, and running firmware workflows through Axis VAPIX APIs. The app is not hosted yet and is currently intended to run locally with a FastAPI backend and Next.js frontend.
