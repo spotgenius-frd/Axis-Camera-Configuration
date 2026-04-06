@@ -1,8 +1,11 @@
 "use client";
 
+import { useState } from "react";
+
 import {
   InfoIcon,
   LoaderCircleIcon,
+  LockKeyholeIcon,
   RefreshCwIcon,
   SearchIcon,
   ShieldCheckIcon,
@@ -26,6 +29,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import type {
+  NetworkScanOnboardResult,
   ScanInterfaceOption,
   ScanTarget,
   ScannedAxisDevice,
@@ -36,24 +40,26 @@ type NetworkScanPanelProps = {
   scanTarget: ScanTarget | null;
   devices: ScannedAxisDevice[];
   errors: string[];
+  onboardingResults: NetworkScanOnboardResult[] | null;
   selectedDeviceIps: string[];
   interfaceName: string;
   cidr: string;
-  defaultUsername: string;
-  defaultPassword: string;
+  followupUsername: string;
+  followupPassword: string;
   loadingOptions: boolean;
   scanBusy: boolean;
   importBusy: boolean;
   onReloadOptions: () => void;
   onInterfaceNameChange: (value: string) => void;
   onCidrChange: (value: string) => void;
-  onDefaultUsernameChange: (value: string) => void;
-  onDefaultPasswordChange: (value: string) => void;
+  onFollowupUsernameChange: (value: string) => void;
+  onFollowupPasswordChange: (value: string) => void;
   onToggleSelection: (ip: string, checked: boolean) => void;
   onToggleSelectAll: (checked: boolean) => void;
   onScan: () => void;
   onAddSelected: () => void;
-  onAddSelectedAndRead: () => void;
+  onStartSetup: (onboardingPassword: string) => Promise<boolean>;
+  onReadFlagged: (username: string, password: string) => Promise<boolean>;
 };
 
 function formatPorts(device: ScannedAxisDevice): string {
@@ -72,36 +78,64 @@ export function NetworkScanPanel({
   scanTarget,
   devices,
   errors,
+  onboardingResults,
   selectedDeviceIps,
   interfaceName,
   cidr,
-  defaultUsername,
-  defaultPassword,
+  followupUsername,
+  followupPassword,
   loadingOptions,
   scanBusy,
   importBusy,
   onReloadOptions,
   onInterfaceNameChange,
   onCidrChange,
-  onDefaultUsernameChange,
-  onDefaultPasswordChange,
+  onFollowupUsernameChange,
+  onFollowupPasswordChange,
   onToggleSelection,
   onToggleSelectAll,
   onScan,
   onAddSelected,
-  onAddSelectedAndRead,
+  onStartSetup,
+  onReadFlagged,
 }: NetworkScanPanelProps) {
   const allSelected = devices.length > 0 && selectedDeviceIps.length === devices.length;
   const selectedCount = selectedDeviceIps.length;
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [setupError, setSetupError] = useState<string | null>(null);
+  const needsCredentials = (onboardingResults ?? []).filter(
+    (result) => result.status === "needs_credentials",
+  );
+
+  const submitSetup = async () => {
+    if (!newPassword.trim()) {
+      setSetupError("Enter the new root password to use for first-time onboarding.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setSetupError("Password confirmation does not match.");
+      return;
+    }
+    setSetupError(null);
+    const ok = await onStartSetup(newPassword);
+    if (ok) {
+      setSetupOpen(false);
+      setNewPassword("");
+      setConfirmPassword("");
+    }
+  };
 
   return (
+    <>
     <Card className="border-border/70 shadow-sm">
       <CardHeader className="space-y-4">
         <div className="space-y-1">
           <CardTitle>Scan network</CardTitle>
           <p className="text-sm text-muted-foreground">
             Discover Axis cameras on the same LAN as this backend, then add
-            them directly to the existing batch workflow.
+            them to the batch and start first-time setup from this panel.
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -209,40 +243,139 @@ export function NetworkScanPanel({
         <div className="rounded-2xl border bg-muted/20 p-4">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div className="space-y-1">
-              <p className="text-sm font-medium">Import defaults</p>
+              <p className="text-sm font-medium">First-time onboarding</p>
               <p className="text-xs text-muted-foreground">
-                These values are applied only when importing the selected
-                cameras into the manual-entry batch.
+                Discovery itself does not require credentials. For first-time
+                devices, the app will set a new <code>root</code> password once
+                you start setup.
               </p>
             </div>
             <Badge variant="outline">{selectedCount} selected</Badge>
           </div>
-          <div className="grid gap-4 md:grid-cols-2">
-            <div className="space-y-2">
-              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Default username
-              </Label>
-              <Input
-                value={defaultUsername}
-                onChange={(event) => onDefaultUsernameChange(event.target.value)}
-                placeholder="root"
-                disabled={importBusy}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Default password
-              </Label>
-              <Input
-                type="password"
-                value={defaultPassword}
-                onChange={(event) => onDefaultPasswordChange(event.target.value)}
-                placeholder="Optional for import, required for read now"
-                disabled={importBusy}
-              />
-            </div>
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              The app will try modern first-time onboarding first, then the
+              official legacy fallback <code>root/pass</code>. Devices that
+              already have credentials will be added and flagged for manual
+              credential entry.
+            </p>
+            <p>
+              HTTPS is preferred automatically when the scan detects it.
+            </p>
           </div>
         </div>
+
+        {onboardingResults && onboardingResults.length > 0 && (
+          <div className="rounded-2xl border bg-card/70 p-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Setup results</p>
+                <p className="text-xs text-muted-foreground">
+                  Review which cameras were onboarded automatically and which
+                  still need existing credentials.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary">
+                  {onboardingResults.filter((result) => result.status === "ready").length} ready
+                </Badge>
+                <Badge variant="outline">
+                  {needsCredentials.length} need credentials
+                </Badge>
+                <Badge variant="destructive">
+                  {onboardingResults.filter((result) => result.status === "failed").length} failed
+                </Badge>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {onboardingResults.map((result) => (
+                <div
+                  key={result.camera_ip}
+                  className="flex flex-col gap-2 rounded-xl border px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
+                >
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium">{result.name || result.camera_ip}</p>
+                    <p className="text-xs text-muted-foreground">{result.camera_ip}</p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge
+                      variant={
+                        result.status === "ready"
+                          ? "secondary"
+                          : result.status === "needs_credentials"
+                            ? "outline"
+                            : "destructive"
+                      }
+                    >
+                      {result.status === "ready"
+                        ? result.auth_path === "legacy_root_pass_updated"
+                          ? "Legacy default normalized"
+                          : result.auth_path === "existing_credentials_required"
+                            ? "Read with existing credentials"
+                            : "First-time setup complete"
+                        : result.status === "needs_credentials"
+                          ? "Needs existing credentials"
+                          : "Setup failed"}
+                    </Badge>
+                    {result.errors.length > 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        {result.errors.join(" · ")}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {needsCredentials.length > 0 && (
+          <div className="rounded-2xl border bg-muted/10 p-4">
+            <div className="mb-4 space-y-1">
+              <p className="text-sm font-medium">Read flagged devices with credentials</p>
+              <p className="text-xs text-muted-foreground">
+                These cameras were discovered successfully, but they already had
+                credentials set. Enter the current shared credentials to read
+                them into the batch.
+              </p>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Username
+                </Label>
+                <Input
+                  value={followupUsername}
+                  onChange={(event) => onFollowupUsernameChange(event.target.value)}
+                  placeholder="root"
+                  disabled={importBusy}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  Password
+                </Label>
+                <Input
+                  type="password"
+                  value={followupPassword}
+                  onChange={(event) => onFollowupPasswordChange(event.target.value)}
+                  placeholder="Current camera password"
+                  disabled={importBusy}
+                />
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button
+                type="button"
+                onClick={() => onReadFlagged(followupUsername, followupPassword)}
+                disabled={importBusy || !followupPassword.trim()}
+              >
+                {importBusy ? <LoaderCircleIcon className="size-4 animate-spin" /> : <LockKeyholeIcon className="size-4" />}
+                Read flagged devices
+              </Button>
+            </div>
+          </div>
+        )}
 
         <div className="rounded-2xl border bg-card/70">
           <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -350,8 +483,9 @@ export function NetworkScanPanel({
 
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-xs text-muted-foreground">
-            Imported cameras land in the manual-entry batch. “Add selected and
-            read now” requires a password because the existing read flow is authenticated.
+            Imported cameras land in the manual-entry batch. Start setup to
+            onboard first-time devices automatically, then continue with IP,
+            password, and camera configuration from the main workflow.
           </p>
           <div className="flex flex-wrap gap-2">
             <Button
@@ -364,21 +498,80 @@ export function NetworkScanPanel({
             </Button>
             <Button
               type="button"
-              onClick={onAddSelectedAndRead}
-              disabled={
-                importBusy || selectedCount === 0 || !defaultPassword.trim()
-              }
+              onClick={() => {
+                setSetupError(null);
+                setSetupOpen(true);
+              }}
+              disabled={importBusy || selectedCount === 0}
             >
               {importBusy ? (
                 <LoaderCircleIcon className="size-4 animate-spin" />
               ) : (
-                <SearchIcon className="size-4" />
+                <LockKeyholeIcon className="size-4" />
               )}
-              Add selected and read now
+              Add selected and start setup
             </Button>
           </div>
         </div>
       </CardContent>
     </Card>
+    {setupOpen && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
+        <div className="w-full max-w-md rounded-2xl border bg-background p-5 shadow-2xl">
+          <div className="space-y-1">
+            <h3 className="text-lg font-semibold">Start first-time setup</h3>
+            <p className="text-sm text-muted-foreground">
+              Enter the new <code>root</code> password to apply to all selected
+              first-time Axis devices.
+            </p>
+          </div>
+          <div className="mt-4 space-y-4">
+            <div className="space-y-2">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                New root password
+              </Label>
+              <Input
+                type="password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                disabled={importBusy}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Confirm password
+              </Label>
+              <Input
+                type="password"
+                value={confirmPassword}
+                onChange={(event) => setConfirmPassword(event.target.value)}
+                disabled={importBusy}
+              />
+            </div>
+            {setupError && (
+              <p className="text-sm text-destructive">{setupError}</p>
+            )}
+          </div>
+          <div className="mt-5 flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                setSetupOpen(false);
+                setSetupError(null);
+              }}
+              disabled={importBusy}
+            >
+              Cancel
+            </Button>
+            <Button type="button" onClick={submitSetup} disabled={importBusy}>
+              {importBusy ? <LoaderCircleIcon className="size-4 animate-spin" /> : <LockKeyholeIcon className="size-4" />}
+              Start setup
+            </Button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

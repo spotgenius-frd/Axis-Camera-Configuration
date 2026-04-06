@@ -4,6 +4,8 @@ import type {
   NetworkConfigRequest,
   NetworkConfigResponse,
   NetworkScanRequest,
+  NetworkScanOnboardRequest,
+  NetworkScanOnboardResponse,
   NetworkScanResponse,
   PasswordChangeRequest,
   PasswordChangeResponse,
@@ -171,4 +173,18 @@ export async function runNetworkScan(
     body: JSON.stringify(body),
   });
   return parseResponse<NetworkScanResponse>(response);
+}
+
+export async function onboardScannedDevices(
+  apiBase: string,
+  body: NetworkScanOnboardRequest,
+): Promise<NetworkScanOnboardResponse> {
+  const response = await fetch(`${apiBase}/api/network-scan/onboard`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  return parseResponse<NetworkScanOnboardResponse>(response);
 }

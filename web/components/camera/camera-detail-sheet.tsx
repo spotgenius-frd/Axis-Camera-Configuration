@@ -51,7 +51,9 @@ import {
   getCameraDisplayName,
   getCameraStatus,
   getMetricRows,
+  isOverlayActive,
 } from "@/lib/camera-utils";
+import { getSupportedUsTimeZones } from "@/lib/us-time-zones";
 
 type CameraDetailSheetProps = {
   result: CameraResult | null;
@@ -111,6 +113,13 @@ const STREAM_PROFILE_FIELDS: Array<{ key: string; label: string }> = [
   { key: "textstring", label: "Overlay text" },
   { key: "signedvideo", label: "Signed video" },
 ];
+
+type DetailTabValue =
+  | "settings"
+  | "access"
+  | "network"
+  | "stream-profiles"
+  | "firmware";
 
 export function CameraDetailSheet({
   result,
@@ -258,12 +267,25 @@ function CameraDetailContent({
     phase: "idle",
     elapsedSeconds: 0,
   });
+  const [settingsStatus, setSettingsStatus] = useState<DetailActionStatusState>({
+    phase: "idle",
+    elapsedSeconds: 0,
+  });
   const [profileName, setProfileName] = useState("");
   const [profileDescription, setProfileDescription] = useState("");
   const [profileValues, setProfileValues] = useState<Record<string, string>>({});
   const [editingProfileName, setEditingProfileName] = useState<string | null>(null);
   const [showStreamProfileForm, setShowStreamProfileForm] = useState(false);
+  const [streamProfileStatus, setStreamProfileStatus] = useState<DetailActionStatusState>({
+    phase: "idle",
+    elapsedSeconds: 0,
+  });
   const [firmwareFile, setFirmwareFile] = useState<File | null>(null);
+  const [firmwareStatus, setFirmwareStatus] = useState<DetailActionStatusState>({
+    phase: "idle",
+    elapsedSeconds: 0,
+  });
+  const [activeTab, setActiveTab] = useState<DetailTabValue>("settings");
   const [firmwareActionsOpen, setFirmwareActionsOpen] = useState(false);
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => {
     const out: Record<string, boolean> = {};
@@ -277,14 +299,20 @@ function CameraDetailContent({
   const networkConfig = result.network_config;
   const streamProfiles = result.stream_profiles_structured ?? [];
   const latestFirmware = result.latest_firmware;
+  const visibleDynamicOverlays = useMemo(
+    () => getVisibleDynamicOverlays(result.dynamic_overlays),
+    [result.dynamic_overlays],
+  );
   const editableGroups = useMemo(() => {
     const catalog = result.web_settings_catalog ?? {};
-    const entries = Object.entries(catalog).map(([groupName, entries]) => ({
-      title: groupName.replace("_", " / "),
-      icon: GROUP_ICONS[groupName] ?? ImageIcon,
-      groupName,
-      items: entries,
-    }));
+    const entries = Object.entries(catalog)
+      .filter(([groupName]) => groupName !== "firmware")
+      .map(([groupName, entries]) => ({
+        title: groupName.replace("_", " / "),
+        icon: GROUP_ICONS[groupName] ?? ImageIcon,
+        groupName,
+        items: entries,
+      }));
     const orderMap = new Map(GROUP_ORDER.map((name, i) => [name, i]));
     entries.sort((a, b) => (orderMap.get(a.groupName) ?? 99) - (orderMap.get(b.groupName) ?? 99));
     return entries;
@@ -303,6 +331,10 @@ function CameraDetailContent({
     setNetworkStatus({ phase: "idle", elapsedSeconds: 0 });
     setPasswordDraft({ newPassword: "", confirmPassword: "", showPassword: false });
     setPasswordStatus({ phase: "idle", elapsedSeconds: 0 });
+    setSettingsStatus({ phase: "idle", elapsedSeconds: 0 });
+    setStreamProfileStatus({ phase: "idle", elapsedSeconds: 0 });
+    setFirmwareStatus({ phase: "idle", elapsedSeconds: 0 });
+    setActiveTab("settings");
   }, [result.network_config, result.camera_ip]);
 
   useEffect(() => {
@@ -342,6 +374,104 @@ function CameraDetailContent({
     }, 250);
     return () => window.clearInterval(interval);
   }, [passwordStatus.phase, passwordStatus.startedAt]);
+
+  useEffect(() => {
+    if (settingsStatus.phase !== "saving") {
+      return;
+    }
+    const startedAt = settingsStatus.startedAt ?? Date.now();
+    const interval = window.setInterval(() => {
+      setSettingsStatus((current) => {
+        if (current.phase !== "saving") {
+          return current;
+        }
+        return {
+          ...current,
+          elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        };
+      });
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, [settingsStatus.phase, settingsStatus.startedAt]);
+
+  useEffect(() => {
+    if (streamProfileStatus.phase !== "saving") {
+      return;
+    }
+    const startedAt = streamProfileStatus.startedAt ?? Date.now();
+    const interval = window.setInterval(() => {
+      setStreamProfileStatus((current) => {
+        if (current.phase !== "saving") {
+          return current;
+        }
+        return {
+          ...current,
+          elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        };
+      });
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, [streamProfileStatus.phase, streamProfileStatus.startedAt]);
+
+  useEffect(() => {
+    if (firmwareStatus.phase !== "saving") {
+      return;
+    }
+    const startedAt = firmwareStatus.startedAt ?? Date.now();
+    const interval = window.setInterval(() => {
+      setFirmwareStatus((current) => {
+        if (current.phase !== "saving") {
+          return current;
+        }
+        return {
+          ...current,
+          elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        };
+      });
+    }, 250);
+    return () => window.clearInterval(interval);
+  }, [firmwareStatus.phase, firmwareStatus.startedAt]);
+
+  const updateDraftValue = (key: string, value: string) => {
+    setSettingsStatus({ phase: "idle", elapsedSeconds: 0 });
+    setDraftValues((current) => ({ ...current, [key]: value }));
+  };
+
+  const updateDraftTimeZone = (value: string) => {
+    setSettingsStatus({ phase: "idle", elapsedSeconds: 0 });
+    setDraftTimeZone(value);
+  };
+
+  const updatePasswordDraft = <K extends keyof PasswordDraft>(
+    key: K,
+    value: PasswordDraft[K],
+  ) => {
+    setPasswordStatus({ phase: "idle", elapsedSeconds: 0 });
+    setPasswordDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const updateNetworkDraft = <K extends keyof NetworkDraft>(
+    key: K,
+    value: NetworkDraft[K],
+  ) => {
+    setNetworkStatus({ phase: "idle", elapsedSeconds: 0 });
+    setNetworkDraft((current) => ({ ...current, [key]: value }));
+  };
+
+  const updateProfileName = (value: string) => {
+    setStreamProfileStatus({ phase: "idle", elapsedSeconds: 0 });
+    setProfileName(value);
+  };
+
+  const updateProfileDescription = (value: string) => {
+    setStreamProfileStatus({ phase: "idle", elapsedSeconds: 0 });
+    setProfileDescription(value);
+  };
+
+  const updateProfileValue = (key: string, value: string) => {
+    setStreamProfileStatus({ phase: "idle", elapsedSeconds: 0 });
+    setProfileValues((current) => ({ ...current, [key]: value }));
+  };
 
   const saveSettings = async () => {
     if (!camera) {
@@ -401,7 +531,32 @@ function CameraDetailContent({
     if (nextTimeZone && nextTimeZone !== currentTz) {
       payload.time_zone = nextTimeZone;
     }
-    await onApplyConfig(camera, payload);
+    const startedAt = Date.now();
+    setSettingsStatus({
+      phase: "saving",
+      startedAt,
+      elapsedSeconds: 0,
+      title: "Saving settings",
+      message: "Applying camera settings.",
+    });
+    try {
+      await onApplyConfig(camera, payload);
+      setSettingsStatus({
+        phase: "success",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Settings updated",
+        message: "Camera settings updated successfully.",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Camera settings update failed.";
+      setSettingsStatus({
+        phase: "error",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Settings update failed",
+        message,
+      });
+    }
   };
 
   const saveNetworkConfig = async () => {
@@ -578,6 +733,7 @@ function CameraDetailContent({
   };
 
   const startEditingProfile = (name: string) => {
+    setStreamProfileStatus({ phase: "idle", elapsedSeconds: 0 });
     const profile = streamProfiles.find((item) => item.name === name);
     if (!profile) {
       return;
@@ -590,6 +746,7 @@ function CameraDetailContent({
   };
 
   const startCreateProfile = () => {
+    setStreamProfileStatus({ phase: "idle", elapsedSeconds: 0 });
     setEditingProfileName(null);
     setProfileName("");
     setProfileDescription("");
@@ -606,38 +763,152 @@ function CameraDetailContent({
       description: profileDescription.trim(),
       values: profileValues,
     };
-    await onApplyStreamProfiles(camera, {
-      action: "create_or_update",
-      profiles: [payload],
+    const startedAt = Date.now();
+    const displayName = profileName.trim();
+    setStreamProfileStatus({
+      phase: "saving",
+      startedAt,
+      elapsedSeconds: 0,
+      title: editingProfileName ? "Updating stream profile" : "Saving stream profile",
+      message: editingProfileName ? `Updating ${displayName}.` : `Creating ${displayName}.`,
     });
-    setEditingProfileName(null);
-    setProfileName("");
-    setProfileDescription("");
-    setProfileValues({});
-    setShowStreamProfileForm(false);
+    try {
+      await onApplyStreamProfiles(camera, {
+        action: "create_or_update",
+        profiles: [payload],
+      });
+      setEditingProfileName(null);
+      setProfileName("");
+      setProfileDescription("");
+      setProfileValues({});
+      setShowStreamProfileForm(false);
+      setStreamProfileStatus({
+        phase: "success",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: editingProfileName ? "Stream profile updated" : "Stream profile saved",
+        message: editingProfileName
+          ? `${displayName} updated successfully.`
+          : `${displayName} created successfully.`,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Stream profile save failed.";
+      setStreamProfileStatus({
+        phase: "error",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: editingProfileName ? "Stream profile update failed" : "Stream profile save failed",
+        message,
+      });
+    }
   };
 
   const removeProfile = async (name: string) => {
     if (!camera) {
       return;
     }
-    await onApplyStreamProfiles(camera, {
-      action: "remove",
-      names: [name],
+    const startedAt = Date.now();
+    setStreamProfileStatus({
+      phase: "saving",
+      startedAt,
+      elapsedSeconds: 0,
+      title: "Removing stream profile",
+      message: `Removing ${name}.`,
     });
+    try {
+      await onApplyStreamProfiles(camera, {
+        action: "remove",
+        names: [name],
+      });
+      setStreamProfileStatus({
+        phase: "success",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Stream profile removed",
+        message: `${name} removed successfully.`,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Stream profile removal failed.";
+      setStreamProfileStatus({
+        phase: "error",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Stream profile removal failed",
+        message,
+      });
+    }
   };
 
   const uploadFirmware = async () => {
     if (!camera || !firmwareFile) {
       return;
     }
-    await onUploadFirmware(camera, firmwareFile);
+    const startedAt = Date.now();
+    setFirmwareStatus({
+      phase: "saving",
+      startedAt,
+      elapsedSeconds: 0,
+      title: "Uploading firmware",
+      message: `Uploading ${firmwareFile.name}.`,
+    });
+    try {
+      await onUploadFirmware(camera, firmwareFile);
+      setFirmwareStatus({
+        phase: "success",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Firmware command sent",
+        message: "Firmware upload started successfully.",
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Firmware upload failed.";
+      setFirmwareStatus({
+        phase: "error",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Firmware upload failed",
+        message,
+      });
+    }
+  };
+
+  const runFirmwareAction = async (action: FirmwareActionRequest["action"]) => {
+    if (!camera) {
+      return;
+    }
+    const startedAt = Date.now();
+    setFirmwareStatus({
+      phase: "saving",
+      startedAt,
+      elapsedSeconds: 0,
+      title: "Running firmware action",
+      message: `Sending ${formatMetricLabel(action)} command.`,
+    });
+    try {
+      await onRunFirmwareAction(camera, { action });
+      setFirmwareStatus({
+        phase: "success",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Firmware command sent",
+        message: `${formatMetricLabel(action)} command sent successfully.`,
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Firmware action failed.";
+      setFirmwareStatus({
+        phase: "error",
+        elapsedSeconds: roundElapsedSeconds((Date.now() - startedAt) / 1000),
+        title: "Firmware action failed",
+        message,
+      });
+    }
   };
 
   return (
-    <>
+    <div className="space-y-6 pb-6">
       <CompactOverview result={result} latestFirmwareVersion={latestFirmware?.version} />
-      <Tabs defaultValue="settings" className="flex flex-col gap-4">
+      <Tabs
+        value={activeTab}
+        onValueChange={(value) => setActiveTab(value as DetailTabValue)}
+        className="flex flex-col gap-4"
+      >
         <TabsList className="grid w-full grid-cols-5">
           <TabsTrigger value="settings">Settings</TabsTrigger>
           <TabsTrigger value="access">Access</TabsTrigger>
@@ -649,7 +920,7 @@ function CameraDetailContent({
           <TimeSectionCompact
             result={result}
             value={draftTimeZone}
-            onChange={setDraftTimeZone}
+            onChange={updateDraftTimeZone}
           />
           {editableGroups.map((group) => (
             <EditableGroupSection
@@ -657,6 +928,10 @@ function CameraDetailContent({
               title={group.title}
               icon={group.icon}
               items={group.items}
+              groupName={group.groupName}
+              dynamicOverlays={
+                group.groupName === "overlay" ? visibleDynamicOverlays : []
+              }
               values={draftValues}
               open={openGroups[group.groupName] ?? false}
               onToggleOpen={() =>
@@ -665,30 +940,16 @@ function CameraDetailContent({
                   [group.groupName]: !(prev[group.groupName] ?? false),
                 }))
               }
-              onChange={(key, value) =>
-                setDraftValues((current) => ({ ...current, [key]: value }))
-              }
+              onChange={updateDraftValue}
             />
           ))}
-          <div className="flex justify-end pt-2">
-            <Button onClick={saveSettings} disabled={busy || !camera}>
-              Save camera settings
-            </Button>
-          </div>
         </TabsContent>
         <TabsContent value="access" className="mt-0">
           <AccessSection
             username={camera?.username ?? "root"}
             draft={passwordDraft}
-            status={passwordStatus}
             busy={busy}
-            onChange={(key, value) =>
-              setPasswordDraft((current) => ({
-                ...current,
-                [key]: value,
-              }))
-            }
-            onSave={savePasswordChange}
+            onChange={updatePasswordDraft}
           />
         </TabsContent>
         <TabsContent value="network" className="mt-0">
@@ -697,13 +958,7 @@ function CameraDetailContent({
             draft={networkDraft}
             status={networkStatus}
             busy={busy}
-            onChange={(key, value) =>
-              setNetworkDraft((current) => ({
-                ...current,
-                [key]: value,
-              }))
-            }
-            onSave={saveNetworkConfig}
+            onChange={updateNetworkDraft}
           />
         </TabsContent>
         <TabsContent value="stream-profiles" className="mt-0">
@@ -717,19 +972,9 @@ function CameraDetailContent({
             onEdit={startEditingProfile}
             onRemove={removeProfile}
             onCreateClick={startCreateProfile}
-            onNameChange={setProfileName}
-            onDescriptionChange={setProfileDescription}
-            onValueChange={(key, value) =>
-              setProfileValues((current) => ({ ...current, [key]: value }))
-            }
-            onSave={saveProfile}
-            onCancel={() => {
-              setEditingProfileName(null);
-              setProfileName("");
-              setProfileDescription("");
-              setProfileValues({});
-              setShowStreamProfileForm(false);
-            }}
+            onNameChange={updateProfileName}
+            onDescriptionChange={updateProfileDescription}
+            onValueChange={updateProfileValue}
             busy={busy}
           />
         </TabsContent>
@@ -737,13 +982,16 @@ function CameraDetailContent({
           <FirmwareSection
             installedFirmware={result.summary?.firmware ?? "Not available"}
             latestFirmware={latestFirmware?.version ?? "Not available"}
+            supportPageUrl={latestFirmware?.support_page_url}
             latestDownloadUrl={latestFirmware?.download_url}
+            fallbackSupportUrl="https://www.axis.com/support/firmware"
             file={firmwareFile}
-            onFileChange={setFirmwareFile}
+            onFileChange={(file) => {
+              setFirmwareStatus({ phase: "idle", elapsedSeconds: 0 });
+              setFirmwareFile(file);
+            }}
             onUpload={uploadFirmware}
-            onAction={(action) =>
-              camera ? onRunFirmwareAction(camera, { action }) : Promise.resolve()
-            }
+            onAction={runFirmwareAction}
             busy={busy}
             actionsOpen={firmwareActionsOpen}
             onActionsOpenChange={setFirmwareActionsOpen}
@@ -754,7 +1002,79 @@ function CameraDetailContent({
           />
         </TabsContent>
       </Tabs>
-    </>
+      <StickyDetailActionBar
+        activeTab={activeTab}
+        settingsStatus={settingsStatus}
+        passwordStatus={passwordStatus}
+        networkStatus={networkStatus}
+        streamProfileStatus={streamProfileStatus}
+        firmwareStatus={firmwareStatus}
+        showStreamProfileActions={showStreamProfileForm || editingProfileName !== null}
+        showFirmwareBar={firmwareStatus.phase !== "idle"}
+      >
+        {activeTab === "settings" ? (
+          <Button onClick={saveSettings} disabled={busy || !camera}>
+            {settingsStatus.phase === "saving" ? (
+              <>
+                <LoaderCircleIcon className="size-4 animate-spin" />
+                Saving settings...
+              </>
+            ) : (
+              "Save camera settings"
+            )}
+          </Button>
+        ) : activeTab === "access" ? (
+          <Button onClick={savePasswordChange} disabled={busy || !camera}>
+            {passwordStatus.phase === "saving" ? (
+              <>
+                <LoaderCircleIcon className="size-4 animate-spin" />
+                Changing password...
+              </>
+            ) : (
+              "Change password"
+            )}
+          </Button>
+        ) : activeTab === "network" ? (
+          <Button onClick={saveNetworkConfig} disabled={busy || !camera}>
+            {networkStatus.phase === "saving" ? (
+              <>
+                <LoaderCircleIcon className="size-4 animate-spin" />
+                Saving network...
+              </>
+            ) : (
+              "Save network settings"
+            )}
+          </Button>
+        ) : activeTab === "stream-profiles" && (showStreamProfileForm || editingProfileName !== null) ? (
+          <>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setStreamProfileStatus({ phase: "idle", elapsedSeconds: 0 });
+                setEditingProfileName(null);
+                setProfileName("");
+                setProfileDescription("");
+                setProfileValues({});
+                setShowStreamProfileForm(false);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+            <Button onClick={saveProfile} disabled={busy || !profileName.trim()}>
+              {streamProfileStatus.phase === "saving" ? (
+                <>
+                  <LoaderCircleIcon className="size-4 animate-spin" />
+                  Saving profile...
+                </>
+              ) : (
+                "Save stream profile"
+              )}
+            </Button>
+          </>
+        ) : null}
+      </StickyDetailActionBar>
+    </div>
   );
 }
 
@@ -779,7 +1099,7 @@ function CompactOverview({
     ["Firmware", result.summary?.firmware ?? "—"],
     ["Latest", latestFirmwareVersion ?? "—"],
     ["Time zone", currentTimeZone(result)],
-    ["Overlay", result.summary?.overlay?.Enabled === "yes" ? "On" : "Off"],
+    ["Overlay", isOverlayActive(result.summary) ? "On" : "Off"],
     ["SD card", result.summary?.sd_card ?? "—"],
   ];
   return (
@@ -798,10 +1118,28 @@ function CompactOverview({
   );
 }
 
+function getVisibleDynamicOverlays(result: CameraResult["dynamic_overlays"]) {
+  const data = result?.data;
+  if (!data) {
+    return [];
+  }
+  const visible = [...(data.textOverlays ?? []), ...(data.imageOverlays ?? [])].filter(
+    (overlay) => overlay && overlay.visible !== false,
+  );
+  return visible.map((overlay) => ({
+    kind: overlay.kind ?? (overlay.text ? "textOverlays" : "imageOverlays"),
+    text: overlay.text,
+    indicator: overlay.indicator,
+    position: overlay.position,
+  }));
+}
+
 function EditableGroupSection({
   title,
   icon: Icon,
   items,
+  groupName,
+  dynamicOverlays,
   values,
   open,
   onToggleOpen,
@@ -810,6 +1148,13 @@ function EditableGroupSection({
   title: string;
   icon: typeof ImageIcon;
   items: WebSettingEntry[];
+  groupName: string;
+  dynamicOverlays: Array<{
+    kind: string;
+    text?: string;
+    indicator?: string;
+    position?: string | [number, number];
+  }>;
   values: Record<string, string>;
   open: boolean;
   onToggleOpen: () => void;
@@ -839,6 +1184,33 @@ function EditableGroupSection({
       </button>
       {open && (
         <div className="space-y-3 border-t px-3 pb-3 pt-2">
+          {groupName === "overlay" && dynamicOverlays.length > 0 ? (
+            <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              <p className="font-medium">Active dynamic overlays detected</p>
+              <p className="mt-1 text-amber-900">
+                The camera is drawing additional overlays through Axis dynamic overlays. These
+                are separate from the legacy `Text enabled / Show clock / Show date` fields below.
+              </p>
+              <div className="mt-2 space-y-2">
+                {dynamicOverlays.map((overlay, index) => (
+                  <div key={`${overlay.kind}-${index}`} className="rounded border border-amber-200 bg-white/70 p-2">
+                    <p className="font-medium">
+                      {overlay.kind === "textOverlays" ? "Text overlay" : "Image overlay"}
+                    </p>
+                    {overlay.text ? <p className="mt-0.5 break-words">{overlay.text}</p> : null}
+                    {overlay.indicator ? (
+                      <p className="mt-0.5 text-xs text-amber-900/80">Indicator: {overlay.indicator}</p>
+                    ) : null}
+                    {overlay.position ? (
+                      <p className="mt-0.5 text-xs text-amber-900/80">
+                        Position: {Array.isArray(overlay.position) ? overlay.position.join(", ") : overlay.position}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
           {guided.length > 0 && (
             <div className="space-y-2">
               {guided.map((item) => (
@@ -932,7 +1304,9 @@ function TimeSectionCompact({
   onChange: (value: string) => void;
 }) {
   const [showDetails, setShowDetails] = useState(false);
-  const timeZoneOptions = result.time_zone_options ?? [];
+  const currentTimeZoneValue = currentTimeZone(result);
+  const timeZoneOptions = getSupportedUsTimeZones(result.time_zone_options);
+  const selectedValue = timeZoneOptions.includes(value) ? value : "";
   const utc = result.time_info_v2?.data?.time?.dateTime ?? result.time_info?.data?.dateTime;
   const local =
     result.time_info_v2?.data?.time?.localDateTime ??
@@ -943,24 +1317,21 @@ function TimeSectionCompact({
         <Clock3Icon className="size-4 text-primary" />
         <h3 className="font-medium">Time zone</h3>
       </div>
-      {timeZoneOptions.length > 0 ? (
-        <NativeSelect
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-        >
-          {timeZoneOptions.map((option) => (
-            <option key={option} value={option}>
-              {option}
-            </option>
-          ))}
-        </NativeSelect>
-      ) : (
-        <Input
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder="America/Chicago"
-        />
-      )}
+      <NativeSelect
+        value={selectedValue}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        <option value="">
+          {currentTimeZoneValue !== "Not available"
+            ? `Keep current (${currentTimeZoneValue})`
+            : "Select U.S. time zone"}
+        </option>
+        {timeZoneOptions.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </NativeSelect>
       <button
         type="button"
         onClick={() => setShowDetails((v) => !v)}
@@ -1016,6 +1387,21 @@ type PasswordStatusState = {
   elapsedSeconds: number;
   message?: string;
   response?: PasswordChangeResult;
+};
+
+type DetailActionStatusState = {
+  phase: "idle" | "saving" | "success" | "error";
+  startedAt?: number;
+  elapsedSeconds: number;
+  title?: string;
+  message?: string;
+};
+
+type StickyActionStatusState = {
+  phase: "idle" | "saving" | "success" | "warning" | "error";
+  elapsedSeconds: number;
+  title?: string;
+  message?: string;
 };
 
 function roundElapsedSeconds(value: number): number {
@@ -1161,20 +1547,139 @@ function buildNetworkConfirmation(
   return lines.join("\n");
 }
 
+function mapPasswordStatusToSticky(status: PasswordStatusState): StickyActionStatusState {
+  return {
+    phase: status.phase,
+    elapsedSeconds: status.elapsedSeconds,
+    title:
+      status.phase === "saving"
+        ? "Updating password"
+        : status.phase === "success"
+          ? "Password verified"
+          : status.phase === "warning"
+            ? "Re-authentication required"
+            : status.phase === "error"
+              ? "Password change failed"
+              : undefined,
+    message: status.message,
+  };
+}
+
+function mapNetworkStatusToSticky(status: NetworkStatusState): StickyActionStatusState {
+  return {
+    phase: status.phase,
+    elapsedSeconds: status.elapsedSeconds,
+    title:
+      status.phase === "saving"
+        ? "Saving network settings"
+        : status.phase === "success"
+          ? "Camera reachable"
+          : status.phase === "error"
+            ? "Network update failed"
+            : undefined,
+    message: status.message,
+  };
+}
+
+function StickyDetailActionBar({
+  activeTab,
+  settingsStatus,
+  passwordStatus,
+  networkStatus,
+  streamProfileStatus,
+  firmwareStatus,
+  showStreamProfileActions,
+  showFirmwareBar,
+  children,
+}: {
+  activeTab: DetailTabValue;
+  settingsStatus: DetailActionStatusState;
+  passwordStatus: PasswordStatusState;
+  networkStatus: NetworkStatusState;
+  streamProfileStatus: DetailActionStatusState;
+  firmwareStatus: DetailActionStatusState;
+  showStreamProfileActions: boolean;
+  showFirmwareBar: boolean;
+  children?: ReactNode;
+}) {
+  const status: StickyActionStatusState =
+    activeTab === "settings"
+      ? settingsStatus
+      : activeTab === "access"
+        ? mapPasswordStatusToSticky(passwordStatus)
+        : activeTab === "network"
+          ? mapNetworkStatusToSticky(networkStatus)
+          : activeTab === "stream-profiles"
+            ? streamProfileStatus
+            : firmwareStatus;
+
+  const visible =
+    activeTab === "settings" ||
+    activeTab === "access" ||
+    activeTab === "network" ||
+    (activeTab === "stream-profiles" &&
+      (showStreamProfileActions || status.phase !== "idle")) ||
+    (activeTab === "firmware" && showFirmwareBar);
+
+  if (!visible) {
+    return null;
+  }
+
+  return (
+    <div className="sticky bottom-0 z-20 -mx-6 mt-6 border-t bg-background/95 px-6 py-4 shadow-[0_-8px_24px_-16px_rgba(0,0,0,0.25)] backdrop-blur supports-[backdrop-filter]:bg-background/80">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        {status.phase === "idle" ? (
+          <div className="text-sm text-muted-foreground">
+            {activeTab === "settings"
+              ? "Save changes when you are ready."
+              : activeTab === "access"
+                ? "Apply the new password when you are ready."
+                : activeTab === "network"
+                  ? "Apply the network changes when you are ready."
+                  : activeTab === "stream-profiles"
+                    ? "Review the profile details, then save."
+                    : "Firmware progress will appear here while commands are running."}
+          </div>
+        ) : (
+          <div className="flex items-start gap-3 text-sm">
+            {status.phase === "saving" ? (
+              <LoaderCircleIcon className="mt-0.5 size-4 shrink-0 animate-spin" />
+            ) : status.phase === "success" ? (
+              <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-emerald-600" />
+            ) : (
+              <TriangleAlertIcon
+                className={`mt-0.5 size-4 shrink-0 ${
+                  status.phase === "warning" ? "text-amber-600" : "text-destructive"
+                }`}
+              />
+            )}
+            <div className="space-y-0.5">
+              <p className="font-medium">{status.title}</p>
+              {status.message ? <p className="text-muted-foreground">{status.message}</p> : null}
+              <p className="text-xs text-muted-foreground">
+                Elapsed: {status.elapsedSeconds.toFixed(1)}s
+              </p>
+            </div>
+          </div>
+        )}
+        {children ? (
+          <div className="flex flex-wrap justify-end gap-2">{children}</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function AccessSection({
   username,
   draft,
-  status,
   busy,
   onChange,
-  onSave,
 }: {
   username: string;
   draft: PasswordDraft;
-  status: PasswordStatusState;
   busy: boolean;
   onChange: <K extends keyof PasswordDraft>(key: K, value: PasswordDraft[K]) => void;
-  onSave: () => Promise<void>;
 }) {
   return (
     <section className="space-y-4">
@@ -1193,45 +1698,6 @@ function AccessSection({
           </div>
         </div>
       </div>
-
-      {status.phase !== "idle" && (
-        <div
-          className={`rounded-lg border p-4 text-sm ${
-            status.phase === "success"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
-              : status.phase === "warning"
-                ? "border-amber-300 bg-amber-50 text-amber-950"
-                : status.phase === "error"
-                  ? "border-destructive/30 bg-destructive/5 text-destructive"
-                  : "border-primary/20 bg-primary/5 text-foreground"
-          }`}
-        >
-          <div className="flex items-start gap-3">
-            {status.phase === "saving" ? (
-              <LoaderCircleIcon className="mt-0.5 size-4 animate-spin" />
-            ) : status.phase === "success" ? (
-              <CheckCircle2Icon className="mt-0.5 size-4" />
-            ) : (
-              <TriangleAlertIcon className="mt-0.5 size-4" />
-            )}
-            <div className="space-y-1">
-              <p className="font-medium">
-                {status.phase === "saving"
-                  ? "Updating password"
-                  : status.phase === "success"
-                    ? "Password verified"
-                    : status.phase === "warning"
-                      ? "Re-authentication required"
-                      : "Password change failed"}
-              </p>
-              <p>{status.message}</p>
-              <p className="text-xs opacity-80">
-                Elapsed: {status.elapsedSeconds.toFixed(1)}s
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
 
       <div className="rounded-lg border bg-card/60 p-4 space-y-4">
         <div className="flex items-center gap-2">
@@ -1268,9 +1734,6 @@ function AccessSection({
             />
             Show password text
           </label>
-          <Button onClick={onSave} disabled={busy}>
-            Change password
-          </Button>
         </div>
       </div>
     </section>
@@ -1283,14 +1746,12 @@ function NetworkSection({
   status,
   busy,
   onChange,
-  onSave,
 }: {
   networkConfig?: CameraNetworkConfig | null;
   draft: NetworkDraft;
   status: NetworkStatusState;
   busy: boolean;
   onChange: <K extends keyof NetworkDraft>(key: K, value: NetworkDraft[K]) => void;
-  onSave: () => Promise<void>;
 }) {
   if (!networkConfig) {
     return (
@@ -1480,12 +1941,6 @@ function NetworkSection({
             </FieldGroup>
           </div>
         </div>
-
-        <div className="flex justify-end">
-          <Button onClick={onSave} disabled={busy}>
-            Save network settings
-          </Button>
-        </div>
       </div>
     </section>
   );
@@ -1528,8 +1983,6 @@ function StreamProfilesEditor({
   onNameChange,
   onDescriptionChange,
   onValueChange,
-  onSave,
-  onCancel,
   busy,
 }: {
   profiles: CameraResult["stream_profiles_structured"];
@@ -1544,8 +1997,6 @@ function StreamProfilesEditor({
   onNameChange: (value: string) => void;
   onDescriptionChange: (value: string) => void;
   onValueChange: (key: string, value: string) => void;
-  onSave: () => Promise<void>;
-  onCancel: () => void;
   busy: boolean;
 }) {
   const showForm = showCreateForm || editingProfileName !== null;
@@ -1600,14 +2051,9 @@ function StreamProfilesEditor({
         ))}
         {showForm && (
           <div className="rounded-lg border bg-card/60 p-4 space-y-3">
-            <div className="flex items-center justify-between gap-3">
-              <h4 className="font-medium">
-                {editingProfileName ? `Edit ${editingProfileName}` : "Create stream profile"}
-              </h4>
-              <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
-                Cancel
-              </Button>
-            </div>
+            <h4 className="font-medium">
+              {editingProfileName ? `Edit ${editingProfileName}` : "Create stream profile"}
+            </h4>
             <Input value={profileName} onChange={(event) => onNameChange(event.target.value)} placeholder="Profile name" />
             <Input
               value={description}
@@ -1626,11 +2072,6 @@ function StreamProfilesEditor({
                 </div>
               ))}
             </div>
-            <div className="flex justify-end">
-              <Button onClick={onSave} disabled={busy || !profileName.trim()}>
-                Save stream profile
-              </Button>
-            </div>
           </div>
         )}
       </div>
@@ -1641,7 +2082,9 @@ function StreamProfilesEditor({
 function FirmwareSection({
   installedFirmware,
   latestFirmware,
+  supportPageUrl,
   latestDownloadUrl,
+  fallbackSupportUrl,
   file,
   onFileChange,
   onUpload,
@@ -1656,7 +2099,9 @@ function FirmwareSection({
 }: {
   installedFirmware: string;
   latestFirmware: string;
+  supportPageUrl?: string;
   latestDownloadUrl?: string;
+  fallbackSupportUrl: string;
   file: File | null;
   onFileChange: (file: File | null) => void;
   onUpload: () => Promise<void>;
@@ -1691,7 +2136,7 @@ function FirmwareSection({
             Uploading firmware or applying action…
           </p>
         )}
-        {lastWriteResult && !busy && (
+        {lastWriteResult && lastWriteNeedsRefresh && !busy && (
           <div className="mb-3 space-y-2">
             <p className="text-xs text-muted-foreground">
               {lastWriteResult.ok
@@ -1726,14 +2171,22 @@ function FirmwareSection({
               Latest official
             </p>
             <p className="mt-0.5 text-sm font-medium">{latestFirmware}</p>
+            <a
+              className="mt-1 inline-block text-xs text-primary underline"
+              href={supportPageUrl || fallbackSupportUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {supportPageUrl ? "Open Axis firmware page" : "Open Axis firmware portal"}
+            </a>
             {latestDownloadUrl ? (
               <a
-                className="mt-1 inline-block text-xs text-primary underline"
+                className="mt-1 block text-xs text-primary underline"
                 href={latestDownloadUrl}
                 target="_blank"
                 rel="noreferrer"
               >
-                Open download
+                Direct download
               </a>
             ) : null}
           </div>

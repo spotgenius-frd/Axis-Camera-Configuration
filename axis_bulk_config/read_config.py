@@ -130,6 +130,8 @@ def _collect_authenticated_read_errors(out: dict[str, Any]) -> list[str]:
         "optics_state_error",
         "light_control_capabilities_error",
         "light_control_information_error",
+        "dynamic_overlay_supported_versions_error",
+        "dynamic_overlays_error",
     ]:
         value = out.get(key)
         if isinstance(value, str):
@@ -158,6 +160,8 @@ def _has_authenticated_read_success(out: dict[str, Any]) -> bool:
         "optics_state",
         "light_control_capabilities",
         "light_control_information",
+        "dynamic_overlay_supported_versions",
+        "dynamic_overlays",
     ]:
         value = out.get(key)
         if value is not None:
@@ -561,10 +565,53 @@ def _build_capabilities(out: dict) -> dict[str, object]:
     }
 
 
-def _base_url(camera_ip: str, port: int | None) -> str:
-    if port and port != 80:
-        return f"http://{camera_ip}:{port}"
-    return f"http://{camera_ip}"
+def _is_enabled_value(value: Any) -> bool:
+    """Interpret common Axis enabled-state strings as booleans."""
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"yes", "true", "1", "on"}
+
+
+def _derive_overlay_active(overlay_summary: dict[str, Any]) -> bool:
+    """Return True when any visible overlay element is active on the primary channel."""
+    if not isinstance(overlay_summary, dict):
+        return False
+    if any(
+        _is_enabled_value(overlay_summary.get(key))
+        for key in ("Enabled", "TextEnabled", "ClockEnabled", "DateEnabled")
+    ):
+        return True
+    overlay_text = overlay_summary.get("String")
+    return isinstance(overlay_text, str) and bool(overlay_text.strip())
+
+
+def _visible_dynamic_overlays(response: dict | None) -> list[dict[str, Any]]:
+    """Extract visible text/image overlays from the Dynamic Overlay API response."""
+    if not isinstance(response, dict):
+        return []
+    data = response.get("data") or {}
+    if not isinstance(data, dict):
+        return []
+    visible: list[dict[str, Any]] = []
+    for kind in ("textOverlays", "imageOverlays"):
+        overlays = data.get(kind) or []
+        if not isinstance(overlays, list):
+            continue
+        for overlay in overlays:
+            if not isinstance(overlay, dict):
+                continue
+            if overlay.get("visible", True) is False:
+                continue
+            visible.append({"kind": kind, **overlay})
+    return visible
+
+
+def _base_url(camera_ip: str, port: int | None, scheme: str = "http") -> str:
+    normalized_scheme = "https" if str(scheme).lower() == "https" else "http"
+    default_port = 443 if normalized_scheme == "https" else 80
+    if port and port != default_port:
+        return f"{normalized_scheme}://{camera_ip}:{port}"
+    return f"{normalized_scheme}://{camera_ip}"
 
 
 def read_camera_config(
@@ -572,11 +619,12 @@ def read_camera_config(
     username: str,
     password: str,
     port: int | None = None,
+    scheme: str = "http",
     timeout: float = 15.0,
     fetch_param_options: bool = False,
 ) -> dict:
     """Read all config from one camera. No writes. If fetch_param_options=True, also fetch listdefinitions and set out['param_options']."""
-    base_url = _base_url(camera_ip, port or 80)
+    base_url = _base_url(camera_ip, port or (443 if scheme == "https" else 80), scheme)
     client = AxisCameraClient(base_url, username, password, timeout=timeout)
     out = {
         "camera_ip": camera_ip,
@@ -709,6 +757,16 @@ def read_camera_config(
     except Exception as e:
         out["light_control_information_error"] = str(e)
 
+    try:
+        out["dynamic_overlay_supported_versions"] = client.dynamicoverlay_get_supported_versions()
+    except Exception as e:
+        out["dynamic_overlay_supported_versions_error"] = str(e)
+
+    try:
+        out["dynamic_overlays"] = client.dynamicoverlay_list()
+    except Exception as e:
+        out["dynamic_overlays_error"] = str(e)
+
     # Optional: parameter definitions (current value, type, options/range per param) + unified option catalog
     if fetch_param_options:
         merged: dict = {}
@@ -755,6 +813,7 @@ def build_summary(out: dict) -> dict:
         "image": {},
         "stream": [],
         "overlay": {},
+        "overlay_active": False,
         "sd_card": "unknown",
     }
     # Model and firmware from device_info
@@ -789,9 +848,14 @@ def build_summary(out: dict) -> dict:
                 summary["image"].setdefault("wdr", {})[k.split(".")[-1]] = v
         # Overlay: Text.* and Overlay.Enabled
         for k, v in params_image.items():
+            if not k.startswith("root.Image.I0."):
+                continue
             if "Text." in k or (k.endswith("Overlay.Enabled") or ".Overlay.Enabled" in k):
                 key = k.split(".")[-1] if "." in k else k
                 summary["overlay"][key] = v
+        summary["overlay_active"] = _derive_overlay_active(summary["overlay"])
+        if _visible_dynamic_overlays(out.get("dynamic_overlays")):
+            summary["overlay_active"] = True
     if isinstance(params_storage, dict) and "_error" not in params_storage:
         # SD: S0 with DiskID=SD_DISK or DeviceNode containing mmcblk/sd_disk; require Enabled=yes for "yes"
         found_s0_sd = False

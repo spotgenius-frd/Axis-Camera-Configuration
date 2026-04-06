@@ -5,6 +5,7 @@ export type CameraRow = {
   name: string;
   ip: string;
   port: string;
+  scheme?: "http" | "https";
   username: string;
   password: string;
 };
@@ -35,12 +36,14 @@ export type CameraSummary = {
   image: CameraImageSummary;
   stream: CameraStreamSummary[];
   overlay: CameraOverlaySummary;
+  overlay_active: boolean;
   sd_card: string | null;
 };
 
 export type CameraConnection = {
   ip: string;
   port?: number;
+  scheme?: "http" | "https";
   username: string;
   password: string;
   name?: string | null;
@@ -71,6 +74,7 @@ export type LatestFirmwareInfo = {
   version?: string;
   download_url?: string;
   checksum?: string;
+  support_page_url?: string;
 };
 
 export type OptionCatalogEntry = {
@@ -159,6 +163,26 @@ export type CameraNetworkConfig = {
   additional_ipv4_addresses?: string[];
 };
 
+export type DynamicOverlayEntry = {
+  kind?: "textOverlays" | "imageOverlays";
+  camera?: number;
+  identity?: number;
+  text?: string;
+  indicator?: string;
+  position?: string | [number, number];
+  visible?: boolean;
+  reference?: string;
+  zIndex?: number;
+  overlayPath?: string;
+};
+
+export type DynamicOverlayResponse = {
+  data?: {
+    textOverlays?: DynamicOverlayEntry[];
+    imageOverlays?: DynamicOverlayEntry[];
+  };
+};
+
 export type CameraResult = {
   camera_ip: string;
   name: string | null;
@@ -174,6 +198,7 @@ export type CameraResult = {
   capabilities?: CameraCapabilities;
   network_summary?: NetworkSummary | null;
   network_config?: CameraNetworkConfig | null;
+  dynamic_overlays?: DynamicOverlayResponse | null;
   latest_firmware?: LatestFirmwareInfo | null;
 };
 
@@ -182,6 +207,7 @@ export type CameraRequestInput = {
   username: string;
   password: string;
   port?: number;
+  scheme?: "http" | "https";
   name?: string;
 };
 
@@ -321,6 +347,26 @@ export type ScannedAxisDevice = {
 export type NetworkScanRequest = {
   interface_name?: string;
   cidr?: string;
+};
+
+export type NetworkScanOnboardRequest = {
+  devices: ScannedAxisDevice[];
+  onboarding_password: string;
+};
+
+export type NetworkScanOnboardResult = {
+  camera_ip: string;
+  name: string | null;
+  ok: boolean;
+  status: "ready" | "needs_credentials" | "failed";
+  auth_path: "initial_root_created" | "legacy_root_pass_updated" | "existing_credentials_required" | "none";
+  errors: string[];
+  result?: CameraResult | null;
+  connection?: CameraConnection | null;
+};
+
+export type NetworkScanOnboardResponse = {
+  results: NetworkScanOnboardResult[];
 };
 
 export type NetworkScanResponse = {

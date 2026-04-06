@@ -16,6 +16,7 @@ from axis_bulk_config.client import (
     AxisCameraClient,
     check_param_update_response,
     param_update_key_variants,
+    pwdgrp_add_account_unauthenticated,
 )
 from axis_bulk_config.network_config import (
     normalize_network_config,
@@ -27,10 +28,12 @@ from axis_bulk_config.network_config import (
 from axis_bulk_config.read_config import read_camera_config, _to_serializable
 
 
-def base_url(camera_ip: str, port: int | None) -> str:
-    if port and port != 80:
-        return f"http://{camera_ip}:{port}"
-    return f"http://{camera_ip}"
+def base_url(camera_ip: str, port: int | None, scheme: str = "http") -> str:
+    normalized_scheme = "https" if str(scheme).lower() == "https" else "http"
+    default_port = 443 if normalized_scheme == "https" else 80
+    if port and port != default_port:
+        return f"{normalized_scheme}://{camera_ip}:{port}"
+    return f"{normalized_scheme}://{camera_ip}"
 
 
 def _camera_name(camera: dict[str, Any]) -> str | None:
@@ -42,7 +45,11 @@ def _camera_name(camera: dict[str, Any]) -> str | None:
 
 def make_client(camera: dict[str, Any], timeout: float = 30.0) -> AxisCameraClient:
     return AxisCameraClient(
-        base_url(str(camera.get("ip") or ""), camera.get("port")),
+        base_url(
+            str(camera.get("ip") or ""),
+            camera.get("port"),
+            str(camera.get("scheme") or "http"),
+        ),
         str(camera.get("username") or "root"),
         str(camera.get("password") or ""),
         timeout=timeout,
@@ -55,6 +62,7 @@ def refresh_camera(camera: dict[str, Any], timeout: float = 30.0) -> dict[str, A
         str(camera.get("username") or "root"),
         str(camera.get("password") or ""),
         port=camera.get("port"),
+        scheme=str(camera.get("scheme") or "http"),
         timeout=timeout,
         fetch_param_options=True,
     )
@@ -66,6 +74,177 @@ def sanitize_secret(value: str, secret: str) -> str:
     if not secret:
         return value
     return value.replace(secret, "[redacted]")
+
+
+def _scanned_device_name(device: dict[str, Any]) -> str | None:
+    for key in ("hostname", "model", "name"):
+        value = device.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _candidate_scan_connections(device: dict[str, Any]) -> list[dict[str, Any]]:
+    ip = str(device.get("ip") or "").strip()
+    name = _scanned_device_name(device)
+    candidates: list[dict[str, Any]] = []
+    https_port = device.get("https_port")
+    http_port = device.get("http_port")
+    if isinstance(https_port, int) and https_port > 0:
+        candidates.append(
+            {
+                "ip": ip,
+                "port": https_port,
+                "scheme": "https",
+                "username": "root",
+                "password": "",
+                "name": name,
+            }
+        )
+    if isinstance(http_port, int) and http_port > 0:
+        candidates.append(
+            {
+                "ip": ip,
+                "port": http_port,
+                "scheme": "http",
+                "username": "root",
+                "password": "",
+                "name": name,
+            }
+        )
+    if not candidates:
+        candidates.append(
+            {
+                "ip": ip,
+                "port": 80,
+                "scheme": "http",
+                "username": "root",
+                "password": "",
+                "name": name,
+            }
+        )
+    return candidates
+
+
+def _looks_like_existing_credentials_required(exc: Exception) -> bool:
+    if isinstance(exc, AxisCameraError):
+        if exc.status_code in {401, 403}:
+            return True
+        body = (exc.body or "").lower()
+        if "already exists" in body or "already in use" in body:
+            return True
+    lowered = str(exc).lower()
+    return "already exists" in lowered or "access denied" in lowered or "not authorized" in lowered
+
+
+def _sanitize_error_messages(messages: list[str], secret: str) -> list[str]:
+    return [sanitize_secret(message, secret) for message in messages]
+
+
+def onboard_scanned_camera(device: dict[str, Any], onboarding_password: str) -> dict[str, Any]:
+    """Try to onboard a scanned Axis device for first-time setup."""
+    ip = str(device.get("ip") or "?")
+    name = _scanned_device_name(device)
+    if not onboarding_password:
+        return {
+            "camera_ip": ip,
+            "name": name,
+            "ok": False,
+            "status": "failed",
+            "auth_path": "none",
+            "errors": ["An onboarding password is required."],
+        }
+
+    candidates = _candidate_scan_connections(device)
+    onboarding_errors: list[str] = []
+    existing_credentials_required = False
+
+    for candidate in candidates:
+        try:
+            pwdgrp_add_account_unauthenticated(
+                base_url(candidate["ip"], candidate["port"], candidate["scheme"]),
+                "root",
+                onboarding_password,
+            )
+            candidate["password"] = onboarding_password
+            refreshed = refresh_camera(candidate)
+            auth_error = refreshed.get("auth_error")
+            if auth_error:
+                return {
+                    "camera_ip": ip,
+                    "name": name,
+                    "ok": False,
+                    "status": "failed",
+                    "auth_path": "none",
+                    "errors": [auth_error],
+                }
+            return {
+                "camera_ip": ip,
+                "name": name,
+                "ok": True,
+                "status": "ready",
+                "auth_path": "initial_root_created",
+                "errors": [],
+                "camera": candidate,
+            }
+        except Exception as exc:
+            onboarding_errors.append(str(exc))
+            if _looks_like_existing_credentials_required(exc):
+                existing_credentials_required = True
+
+    for candidate in candidates:
+        legacy_camera = dict(candidate)
+        legacy_camera["password"] = "pass"
+        try:
+            legacy_client = make_client(legacy_camera)
+            legacy_client.pwdgrp_get_accounts()
+            legacy_client.pwdgrp_update_password("root", onboarding_password)
+            legacy_camera["password"] = onboarding_password
+            refreshed = refresh_camera(legacy_camera)
+            auth_error = refreshed.get("auth_error")
+            if auth_error:
+                return {
+                    "camera_ip": ip,
+                    "name": name,
+                    "ok": False,
+                    "status": "failed",
+                    "auth_path": "none",
+                    "errors": [auth_error],
+                }
+            return {
+                "camera_ip": ip,
+                "name": name,
+                "ok": True,
+                "status": "ready",
+                "auth_path": "legacy_root_pass_updated",
+                "errors": [],
+                "camera": legacy_camera,
+            }
+        except Exception as exc:
+            onboarding_errors.append(str(exc))
+            if _looks_like_existing_credentials_required(exc):
+                existing_credentials_required = True
+
+    if existing_credentials_required:
+        return {
+            "camera_ip": ip,
+            "name": name,
+            "ok": False,
+            "status": "needs_credentials",
+            "auth_path": "existing_credentials_required",
+            "errors": [
+                "This camera already has credentials set. Enter the existing credentials to continue."
+            ],
+        }
+
+    return {
+        "camera_ip": ip,
+        "name": name,
+        "ok": False,
+        "status": "failed",
+        "auth_path": "none",
+        "errors": _sanitize_error_messages(onboarding_errors[-2:] or ["Unable to onboard this camera."], onboarding_password),
+    }
 
 
 def apply_password_change(camera: dict[str, Any], new_password: str) -> dict[str, Any]:

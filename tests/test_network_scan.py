@@ -1,4 +1,5 @@
 import unittest
+import types
 from unittest.mock import patch
 
 from axis_bulk_config.network_scan import (
@@ -23,15 +24,17 @@ class _FakeAdapter:
 
 
 class NetworkScanTest(unittest.TestCase):
-    @patch("ifaddr.get_adapters")
-    def test_list_interface_options_filters_loopback_and_sorts_private_interfaces_first(self, get_adapters):
-        get_adapters.return_value = [
-            _FakeAdapter("lo0", "lo0", [_FakeIp("127.0.0.1", 8)]),
-            _FakeAdapter("utun3", "utun3", [_FakeIp("10.20.30.40", 24)]),
-            _FakeAdapter("eth0", "eth0", [_FakeIp("192.168.1.15", 24)]),
-        ]
+    def test_list_interface_options_filters_loopback_and_sorts_private_interfaces_first(self):
+        fake_ifaddr = types.SimpleNamespace(
+            get_adapters=lambda: [
+                _FakeAdapter("lo0", "lo0", [_FakeIp("127.0.0.1", 8)]),
+                _FakeAdapter("utun3", "utun3", [_FakeIp("10.20.30.40", 24)]),
+                _FakeAdapter("eth0", "eth0", [_FakeIp("192.168.1.15", 24)]),
+            ]
+        )
 
-        options = list_interface_options()
+        with patch.dict("sys.modules", {"ifaddr": fake_ifaddr}):
+            options = list_interface_options()
 
         self.assertEqual(len(options), 2)
         self.assertEqual(options[0]["name"], "eth0")

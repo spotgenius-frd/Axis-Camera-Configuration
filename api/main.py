@@ -43,6 +43,7 @@ try:
         apply_stream_profile_updates,
         apply_time_zone_update,
         make_client,
+        onboard_scanned_camera,
         refresh_camera,
     )
 except ImportError as e:
@@ -68,6 +69,7 @@ class CameraInput(BaseModel):
     password: str
     port: int | None = None
     name: str | None = None
+    scheme: Literal["http", "https"] | None = None
 
 
 class ReadConfigRequest(BaseModel):
@@ -80,6 +82,7 @@ class CameraTarget(BaseModel):
     password: str
     port: int | None = None
     name: str | None = None
+    scheme: Literal["http", "https"] | None = None
 
 
 class WriteConfigRequest(BaseModel):
@@ -140,6 +143,24 @@ class NetworkScanRequest(BaseModel):
     cidr: str | None = None
 
 
+class ScannedDeviceInput(BaseModel):
+    ip: str
+    mac: str | None = None
+    model: str | None = None
+    serial: str | None = None
+    firmware: str | None = None
+    hostname: str | None = None
+    http_port: int | None = None
+    https_port: int | None = None
+    discovery_sources: list[str] = []
+    confidence: Literal["confirmed", "probable"] = "probable"
+
+
+class NetworkScanOnboardRequest(BaseModel):
+    devices: list[ScannedDeviceInput]
+    onboarding_password: str
+
+
 def _medium_payload(data: dict, name: str | None) -> dict:
     return {
         "camera_ip": data.get("camera_ip"),
@@ -148,6 +169,7 @@ def _medium_payload(data: dict, name: str | None) -> dict:
         "connection": {
             "ip": data.get("camera_ip"),
             "port": data.get("port", 80),
+            "scheme": data.get("scheme", "http"),
             "username": data.get("username"),
             "password": data.get("password"),
             "name": name,
@@ -162,6 +184,7 @@ def _medium_payload(data: dict, name: str | None) -> dict:
         "capabilities": data.get("capabilities"),
         "network_summary": data.get("network_summary"),
         "network_config": data.get("network_config"),
+        "dynamic_overlays": data.get("dynamic_overlays"),
         "latest_firmware": data.get("latest_firmware"),
     }
 
@@ -182,6 +205,7 @@ def _camera_name(camera: dict[str, Any]) -> str | None:
 def _read_one_camera_payload(camera: dict[str, Any], cache: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
     ip = str(camera.get("ip") or "").strip()
     port = camera.get("port")
+    scheme = str(camera.get("scheme") or "http").strip() or "http"
     username = str(camera.get("username") or camera.get("user") or "root").strip()
     password = str(camera.get("password") or "").strip()
     name = _camera_name(camera)
@@ -191,8 +215,16 @@ def _read_one_camera_payload(camera: dict[str, Any], cache: dict[str, dict[str, 
             "name": name,
             "error": "Missing ip or password",
         }
-    data = read_camera_config(ip, username, password, port=port, fetch_param_options=True)
+    data = read_camera_config(
+        ip,
+        username,
+        password,
+        port=port,
+        scheme=scheme,
+        fetch_param_options=True,
+    )
     data["port"] = port or 80
+    data["scheme"] = scheme
     data["username"] = username
     data["password"] = password
     data = _to_serializable(data)
@@ -205,6 +237,7 @@ def _read_one_camera_payload(camera: dict[str, Any], cache: dict[str, dict[str, 
             "image": {},
             "stream": [],
             "overlay": {},
+            "overlay_active": False,
             "sd_card": "unknown",
         }
         data["time_info"] = None
@@ -216,6 +249,7 @@ def _read_one_camera_payload(camera: dict[str, Any], cache: dict[str, dict[str, 
         data["capabilities"] = None
         data["network_summary"] = None
         data["network_config"] = None
+        data["dynamic_overlays"] = None
         data["latest_firmware"] = None
         return _medium_payload(data, name)
     model = ((data.get("summary") or {}).get("model") or "").strip()
@@ -307,6 +341,7 @@ def post_read_config(body: ReadConfigRequest):
             "password": c.password,
             "port": c.port,
             "name": c.name,
+            "scheme": c.scheme,
         }
         for c in body.cameras
     ]
@@ -328,6 +363,73 @@ def post_network_scan(body: NetworkScanRequest):
     if body.cidr and scan["scan_target"] is None:
         raise HTTPException(400, scan["errors"][0])
     return scan
+
+
+@app.post("/api/network-scan/onboard")
+def post_network_scan_onboard(body: NetworkScanOnboardRequest):
+    if not body.onboarding_password.strip():
+        raise HTTPException(400, "An onboarding password is required.")
+
+    latest_cache: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+    for device_model in body.devices:
+        device = device_model.model_dump()
+        onboarding = onboard_scanned_camera(device, body.onboarding_password.strip())
+        updated_camera = onboarding.get("camera")
+        if onboarding.get("status") == "ready" and isinstance(updated_camera, dict):
+            refreshed = _read_one_camera_payload(updated_camera, latest_cache)
+            if refreshed.get("error"):
+                results.append(
+                    {
+                        "camera_ip": device.get("ip") or "?",
+                        "name": _camera_name(device) or device.get("hostname") or device.get("model"),
+                        "ok": False,
+                        "status": "failed",
+                        "auth_path": "none",
+                        "errors": [refreshed.get("error") or "Unable to read the onboarded camera."],
+                        "result": None,
+                        "connection": None,
+                    }
+                )
+                continue
+            connection = dict(refreshed.get("connection") or {})
+            results.append(
+                {
+                    "camera_ip": device.get("ip") or "?",
+                    "name": refreshed.get("name"),
+                    "ok": True,
+                    "status": "ready",
+                    "auth_path": onboarding.get("auth_path") or "none",
+                    "errors": [],
+                    "result": refreshed,
+                    "connection": connection,
+                }
+            )
+            continue
+
+        fallback_connection = None
+        if onboarding.get("status") == "needs_credentials":
+            fallback_connection = {
+                "ip": device.get("ip") or "?",
+                "port": device.get("http_port") or device.get("https_port") or 80,
+                "scheme": "http" if device.get("http_port") else ("https" if device.get("https_port") else "http"),
+                "username": "root",
+                "password": "",
+                "name": device.get("hostname") or device.get("model"),
+            }
+        results.append(
+            {
+                "camera_ip": device.get("ip") or "?",
+                "name": _camera_name(device) or device.get("hostname") or device.get("model"),
+                "ok": bool(onboarding.get("ok")),
+                "status": onboarding.get("status") or "failed",
+                "auth_path": onboarding.get("auth_path") or "none",
+                "errors": onboarding.get("errors") or [],
+                "result": None,
+                "connection": fallback_connection,
+            }
+        )
+    return {"results": results}
 
 
 @app.post("/api/read-config/upload")

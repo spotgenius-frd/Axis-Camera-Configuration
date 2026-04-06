@@ -1,4 +1,8 @@
-import type { CameraResult, CameraRow, ManualRowErrors } from "@/lib/camera-types";
+import type {
+  CameraResult,
+  CameraRow,
+  ManualRowErrors,
+} from "@/lib/camera-types";
 
 export const INITIAL_ROW_ID = "initial";
 export const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024;
@@ -9,6 +13,7 @@ export function defaultRow(id?: string): CameraRow {
     name: "",
     ip: "",
     port: "80",
+    scheme: "http",
     username: "root",
     password: "",
   };
@@ -220,6 +225,32 @@ export function getMetricRows(
 
 export function getCameraDisplayName(result: CameraResult): string {
   return result.name || result.camera_ip || "Camera";
+}
+
+export function isOverlayActive(
+  summary: CameraResult["summary"] | null | undefined,
+): boolean {
+  const overlayActive = summary?.overlay_active;
+  if (typeof overlayActive === "boolean") {
+    return overlayActive;
+  }
+  const overlay = summary?.overlay;
+  if (!overlay) {
+    return false;
+  }
+  const enabledKeys = ["Enabled", "TextEnabled", "ClockEnabled", "DateEnabled"] as const;
+  if (
+    enabledKeys.some((key) =>
+      ["yes", "true", "1", "on"].includes(
+        String(overlay[key] ?? "")
+          .trim()
+          .toLowerCase(),
+      ),
+    )
+  ) {
+    return true;
+  }
+  return typeof overlay.String === "string" && overlay.String.trim().length > 0;
 }
 
 export function getCameraStatus(result: CameraResult): "error" | "success" {

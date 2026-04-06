@@ -33,6 +33,7 @@ import type { CameraResult, WriteResult } from "@/lib/camera-types";
 import {
   getCameraDisplayName,
   getCameraStatus,
+  isOverlayActive,
   getResultStats,
 } from "@/lib/camera-utils";
 
@@ -234,13 +235,12 @@ export function ResultsDataTable({
       },
       {
         id: "overlay",
-        accessorFn: (row) => row.summary?.overlay?.Enabled ?? "",
+        accessorFn: (row) => (isOverlayActive(row.summary) ? "On" : "Off"),
         meta: {
           className: "w-[8%]",
         } satisfies ColumnMeta,
         header: "Overlay",
-        cell: ({ row }) =>
-          row.original.summary?.overlay?.Enabled === "yes" ? "On" : "Off",
+        cell: ({ row }) => (isOverlayActive(row.original.summary) ? "On" : "Off"),
       },
       {
         id: "sdCard",

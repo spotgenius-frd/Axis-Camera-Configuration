@@ -18,6 +18,7 @@ import type {
   CameraResult,
   CameraRow,
   ManualRowErrors,
+  NetworkScanOnboardResult,
   ScanInterfaceOption,
   ScanTarget,
   ScannedAxisDevice,
@@ -44,11 +45,12 @@ type InputWorkspaceProps = {
   scanTarget: ScanTarget | null;
   scanDevices: ScannedAxisDevice[];
   scanErrors: string[];
+  scanOnboardResults: NetworkScanOnboardResult[] | null;
   selectedScanIps: string[];
   scanInterfaceName: string;
   scanCidr: string;
-  scanDefaultUsername: string;
-  scanDefaultPassword: string;
+  scanFollowupUsername: string;
+  scanFollowupPassword: string;
   onAddRow: () => void;
   onUpdateRow: (id: string, field: keyof CameraRow, value: string) => void;
   onRemoveRow: (id: string) => void;
@@ -57,14 +59,15 @@ type InputWorkspaceProps = {
   onSubmitUpload: () => void;
   onScanInterfaceNameChange: (value: string) => void;
   onScanCidrChange: (value: string) => void;
-  onScanDefaultUsernameChange: (value: string) => void;
-  onScanDefaultPasswordChange: (value: string) => void;
+  onScanFollowupUsernameChange: (value: string) => void;
+  onScanFollowupPasswordChange: (value: string) => void;
   onToggleScannedDevice: (ip: string, checked: boolean) => void;
   onToggleAllScannedDevices: (checked: boolean) => void;
   onReloadScanOptions: () => void;
   onSubmitNetworkScan: () => void;
   onImportScannedDevices: () => void;
-  onImportScannedDevicesAndRead: () => void;
+  onStartScanSetup: (onboardingPassword: string) => Promise<boolean>;
+  onReadFlaggedScannedDevices: (username: string, password: string) => Promise<boolean>;
 };
 
 export function InputWorkspace({
@@ -88,11 +91,12 @@ export function InputWorkspace({
   scanTarget,
   scanDevices,
   scanErrors,
+  scanOnboardResults,
   selectedScanIps,
   scanInterfaceName,
   scanCidr,
-  scanDefaultUsername,
-  scanDefaultPassword,
+  scanFollowupUsername,
+  scanFollowupPassword,
   onAddRow,
   onUpdateRow,
   onRemoveRow,
@@ -101,14 +105,15 @@ export function InputWorkspace({
   onSubmitUpload,
   onScanInterfaceNameChange,
   onScanCidrChange,
-  onScanDefaultUsernameChange,
-  onScanDefaultPasswordChange,
+  onScanFollowupUsernameChange,
+  onScanFollowupPasswordChange,
   onToggleScannedDevice,
   onToggleAllScannedDevices,
   onReloadScanOptions,
   onSubmitNetworkScan,
   onImportScannedDevices,
-  onImportScannedDevicesAndRead,
+  onStartScanSetup,
+  onReadFlaggedScannedDevices,
 }: InputWorkspaceProps) {
   return (
     <div className="space-y-4 2xl:sticky 2xl:top-6">
@@ -184,24 +189,26 @@ export function InputWorkspace({
                 scanTarget={scanTarget}
                 devices={scanDevices}
                 errors={scanErrors}
+                onboardingResults={scanOnboardResults}
                 selectedDeviceIps={selectedScanIps}
                 interfaceName={scanInterfaceName}
                 cidr={scanCidr}
-                defaultUsername={scanDefaultUsername}
-                defaultPassword={scanDefaultPassword}
+                followupUsername={scanFollowupUsername}
+                followupPassword={scanFollowupPassword}
                 loadingOptions={isLoadingScanOptions}
                 scanBusy={isScanningNetwork}
                 importBusy={isImportingScanSelection}
                 onInterfaceNameChange={onScanInterfaceNameChange}
                 onCidrChange={onScanCidrChange}
-                onDefaultUsernameChange={onScanDefaultUsernameChange}
-                onDefaultPasswordChange={onScanDefaultPasswordChange}
+                onFollowupUsernameChange={onScanFollowupUsernameChange}
+                onFollowupPasswordChange={onScanFollowupPasswordChange}
                 onToggleSelection={onToggleScannedDevice}
                 onToggleSelectAll={onToggleAllScannedDevices}
                 onReloadOptions={onReloadScanOptions}
                 onScan={onSubmitNetworkScan}
                 onAddSelected={onImportScannedDevices}
-                onAddSelectedAndRead={onImportScannedDevicesAndRead}
+                onStartSetup={onStartScanSetup}
+                onReadFlagged={onReadFlaggedScannedDevices}
               />
             </TabsContent>
           </Tabs>

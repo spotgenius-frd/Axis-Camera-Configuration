@@ -98,6 +98,95 @@ class NetworkScanApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("bad-cidr", response.text)
 
+    @patch("api.main._read_one_camera_payload")
+    @patch("api.main.onboard_scanned_camera")
+    def test_post_network_scan_onboard_ready(self, onboard_scanned_camera, read_one_camera_payload):
+        onboard_scanned_camera.return_value = {
+            "ok": True,
+            "status": "ready",
+            "auth_path": "initial_root_created",
+            "camera": {
+                "ip": "192.168.1.40",
+                "port": 443,
+                "scheme": "https",
+                "username": "root",
+                "password": "new-password",
+            },
+        }
+        read_one_camera_payload.return_value = {
+            "camera_ip": "192.168.1.40",
+            "name": "axis-new",
+            "connection": {
+                "ip": "192.168.1.40",
+                "port": 443,
+                "scheme": "https",
+                "username": "root",
+                "password": "new-password",
+            },
+            "summary": {"model": "AXIS M3215-LVE"},
+        }
+
+        response = self.client.post(
+            "/api/network-scan/onboard",
+            json={
+                "devices": [
+                    {
+                        "ip": "192.168.1.40",
+                        "hostname": "axis-new",
+                        "http_port": 80,
+                        "https_port": 443,
+                        "discovery_sources": ["tcp:80"],
+                        "confidence": "confirmed",
+                    }
+                ],
+                "onboarding_password": "new-password",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["results"][0]["status"], "ready")
+        self.assertEqual(body["results"][0]["connection"]["password"], "new-password")
+
+    @patch("api.main.onboard_scanned_camera")
+    def test_post_network_scan_onboard_needs_credentials(self, onboard_scanned_camera):
+        onboard_scanned_camera.return_value = {
+            "ok": False,
+            "status": "needs_credentials",
+            "auth_path": "existing_credentials_required",
+            "errors": ["This camera already has credentials set."],
+        }
+
+        response = self.client.post(
+            "/api/network-scan/onboard",
+            json={
+                "devices": [
+                    {
+                        "ip": "192.168.1.41",
+                        "hostname": "axis-configured",
+                        "http_port": 80,
+                        "discovery_sources": ["tcp:80"],
+                        "confidence": "confirmed",
+                    }
+                ],
+                "onboarding_password": "new-password",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["results"][0]["status"], "needs_credentials")
+        self.assertEqual(body["results"][0]["connection"]["username"], "root")
+
+    def test_post_network_scan_onboard_requires_password(self):
+        response = self.client.post(
+            "/api/network-scan/onboard",
+            json={"devices": [], "onboarding_password": "   "},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("onboarding password", response.text.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

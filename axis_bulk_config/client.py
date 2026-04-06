@@ -7,7 +7,10 @@ from typing import Any
 from urllib.parse import urlencode
 
 import requests
+import urllib3
 from requests.auth import HTTPDigestAuth
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class AxisCameraError(Exception):
@@ -43,6 +46,8 @@ class AxisCameraClient:
         self._session = requests.Session()
         self._session.auth = HTTPDigestAuth(username, password)
         self._session.headers["Accept"] = "*/*"
+        if self.base_url.startswith("https://"):
+            self._session.verify = False
 
     def _url(self, path: str) -> str:
         if path.startswith("/"):
@@ -110,22 +115,7 @@ class AxisCameraClient:
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=self.timeout,
         )
-        resp.raise_for_status()
-        body = resp.text.strip()
-        lower = body.lower()
-        if (
-            "error" in lower
-            or "failed" in lower
-            or "not authorized" in lower
-            or "access denied" in lower
-        ):
-            first_line = next((line.strip() for line in body.splitlines() if line.strip()), body)
-            raise AxisCameraError(
-                f"User management API error: {first_line}",
-                status_code=resp.status_code,
-                body=body,
-            )
-        return body
+        return _handle_pwdgrp_response(resp)
 
     def basicdeviceinfo(self) -> dict[str, Any]:
         """Get basic device info (no auth required). Returns JSON with data.propertyList."""
@@ -137,6 +127,7 @@ class AxisCameraClient:
                 "method": "getAllUnrestrictedProperties",
             },
             headers={"Content-Type": "application/json"},
+            verify=not self.base_url.startswith("https://"),
             timeout=self.timeout,
         )
         resp.raise_for_status()
@@ -619,6 +610,91 @@ class AxisCameraClient:
                 "pwd": new_password,
             }
         )
+
+    def dynamicoverlay_get_supported_versions(self) -> dict[str, Any]:
+        """Get supported versions for the Dynamic Overlay API."""
+        return self._json_request(
+            "POST",
+            self._url("dynamicoverlay/dynamicoverlay.cgi"),
+            payload={"apiVersion": "1.0", "method": "getSupportedVersions"},
+        )
+
+    def dynamicoverlay_list(
+        self,
+        *,
+        camera: int | None = None,
+        identity: int | None = None,
+        api_version: str = "1.0",
+    ) -> dict[str, Any]:
+        """List dynamic overlays configured on the camera."""
+        params: dict[str, Any] = {}
+        if camera is not None:
+            params["camera"] = camera
+        if identity is not None:
+            params["identity"] = identity
+        payload: dict[str, Any] = {
+            "apiVersion": api_version,
+            "method": "list",
+            "params": params,
+        }
+        return self._json_request(
+            "POST",
+            self._url("dynamicoverlay/dynamicoverlay.cgi"),
+            payload=payload,
+        )
+
+
+def _handle_pwdgrp_response(resp: requests.Response) -> str:
+    """Validate a pwdgrp.cgi response and raise an AxisCameraError on failure."""
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        body = resp.text.strip()
+        raise AxisCameraError(
+            f"User management API error: {body or exc}",
+            status_code=resp.status_code,
+            body=body,
+        ) from exc
+
+    body = resp.text.strip()
+    lower = body.lower()
+    if (
+        "error" in lower
+        or "failed" in lower
+        or "not authorized" in lower
+        or "access denied" in lower
+    ):
+        first_line = next((line.strip() for line in body.splitlines() if line.strip()), body)
+        raise AxisCameraError(
+            f"User management API error: {first_line}",
+            status_code=resp.status_code,
+            body=body,
+        )
+    return body
+
+
+def pwdgrp_add_account_unauthenticated(
+    base_url: str,
+    user: str,
+    password: str,
+    timeout: float = 15.0,
+) -> str:
+    """Create the initial device account without prior auth when the device is factory-default."""
+    url = base_url.rstrip("/") + "/axis-cgi/pwdgrp.cgi"
+    resp = requests.post(
+        url,
+        data={
+            "action": "add",
+            "user": user,
+            "pwd": password,
+            "grp": "admin",
+            "sgrp": "admin:operator:viewer:ptz",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=timeout,
+        verify=not base_url.startswith("https://"),
+    )
+    return _handle_pwdgrp_response(resp)
 
     # --- Imaging / day-night / optics / light control ---
 

@@ -37,32 +37,34 @@ def _support_url(product_code: str) -> str:
 def get_latest_firmware(model: str, timeout: float = 10) -> dict[str, Any] | None:
     """
     Look up latest official firmware for the given model from Axis support page.
-    Returns dict with version, download_url, checksum (optional), or None if unavailable.
+    Returns dict with stable support_page_url plus latest version metadata when available.
     """
     product_code = normalize_model_to_product_code(model)
     if not product_code:
         return None
     url = _support_url(product_code)
+    result: dict[str, Any] = {
+        "product_code": product_code,
+        "support_page_url": url,
+        "version": None,
+        "download_url": None,
+        "checksum": None,
+    }
     try:
         resp = requests.get(url, timeout=timeout, headers={"User-Agent": "Axis-Config-Tool/1.0"})
         resp.raise_for_status()
         text = resp.text
     except Exception:
-        return None
+        return result
     # First "Version X.XX.XXX" is typically the latest
     version_m = re.search(r"Version\s+(\d+\.\d+\.\d+)\s*[-–]", text)
     if not version_m:
-        return None
-    version = version_m.group(1)
+        return result
+    result["version"] = version_m.group(1)
     # First .bin download link on axis.com
     bin_m = re.search(r"(https?://(?:www\.)?axis\.com/ftp/pub/axis/software/[^\s\"']+\.bin)", text)
-    download_url = bin_m.group(1) if bin_m else None
+    result["download_url"] = bin_m.group(1) if bin_m else None
     # Integrity checksum (SHA256 hex) near the first firmware block
     checksum_m = re.search(r"Integrity checksum:\s*([a-fA-F0-9]{64})", text)
-    checksum = checksum_m.group(1) if checksum_m else None
-    return {
-        "version": version,
-        "download_url": download_url,
-        "checksum": checksum,
-        "product_code": product_code,
-    }
+    result["checksum"] = checksum_m.group(1) if checksum_m else None
+    return result

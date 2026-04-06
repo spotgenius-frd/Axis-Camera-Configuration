@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
+import { getSupportedUsTimeZones } from "@/lib/us-time-zones";
 
 type BulkActionBarProps = {
   results: CameraResult[];
@@ -116,9 +117,10 @@ export function BulkActionBar({
       .map((result) => result.time_zone_options ?? [])
       .filter((values) => values.length > 0);
     if (lists.length === 0) {
-      return [];
+      return getSupportedUsTimeZones();
     }
-    return lists[0].filter((value) => lists.every((list) => list.includes(value)));
+    const shared = lists[0].filter((value) => lists.every((list) => list.includes(value)));
+    return getSupportedUsTimeZones(shared);
   }, [targetedResults]);
 
   const modelLatestFirmware = useMemo(() => {
@@ -368,25 +370,22 @@ export function BulkActionBar({
           <>
             <div className="space-y-2 rounded-lg border bg-muted/10 p-4">
               <h4 className="font-medium">Time zone</h4>
-              {commonTimeZones.length > 0 ? (
-                <NativeSelect
-                  value={timeZone}
-                  onChange={(event) => setTimeZone(event.target.value)}
-                >
-                  <option value="">Keep current time zone</option>
-                  {commonTimeZones.map((value) => (
-                    <option key={value} value={value}>
-                      {value}
-                    </option>
-                  ))}
-                </NativeSelect>
-              ) : (
-                <Input
-                  value={timeZone}
-                  onChange={(event) => setTimeZone(event.target.value)}
-                  placeholder="Time zone (e.g. America/Chicago)"
-                />
-              )}
+              <NativeSelect
+                value={timeZone}
+                onChange={(event) => setTimeZone(event.target.value)}
+              >
+                <option value="">Keep current time zone</option>
+                {commonTimeZones.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </NativeSelect>
+              {commonTimeZones.length === 0 ? (
+                <p className="text-xs text-muted-foreground">
+                  No shared U.S. time zones were reported by the targeted cameras.
+                </p>
+              ) : null}
             </div>
 
             <div className="space-y-3 rounded-lg border bg-muted/10 p-4">
