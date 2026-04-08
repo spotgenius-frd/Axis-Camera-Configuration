@@ -139,6 +139,15 @@ def _collect_authenticated_read_errors(out: dict[str, Any]) -> list[str]:
     return messages
 
 
+def _collect_read_errors(out: dict[str, Any]) -> list[str]:
+    messages: list[str] = []
+    device_info_error = out.get("device_info_error")
+    if isinstance(device_info_error, str):
+        messages.append(device_info_error)
+    messages.extend(_collect_authenticated_read_errors(out))
+    return messages
+
+
 def _has_authenticated_read_success(out: dict[str, Any]) -> bool:
     for group in PARAM_GROUPS:
         entry = (out.get("params") or {}).get(group)
@@ -171,12 +180,71 @@ def _has_authenticated_read_success(out: dict[str, Any]) -> bool:
     return False
 
 
+def _has_axis_identity(out: dict[str, Any]) -> bool:
+    device_info = out.get("device_info")
+    if not isinstance(device_info, dict):
+        return False
+    data = device_info.get("data")
+    if not isinstance(data, dict):
+        return False
+    property_list = data.get("propertyList")
+    if not isinstance(property_list, dict) or not property_list:
+        return False
+    brand = str(property_list.get("Brand") or "").strip().upper()
+    if brand:
+        return brand == "AXIS"
+    model = str(property_list.get("ProdFullName") or property_list.get("ProdNbr") or "").strip()
+    return bool(model)
+
+
+def _looks_like_connection_error(message: str | None) -> bool:
+    if not message:
+        return False
+    lowered = message.lower()
+    return any(
+        token in lowered
+        for token in [
+            "max retries exceeded",
+            "failed to establish a new connection",
+            "connection refused",
+            "connection reset",
+            "connection aborted",
+            "read timed out",
+            "connect timeout",
+            "timed out",
+            "name or service not known",
+            "temporary failure in name resolution",
+            "nodename nor servname provided",
+            "no route to host",
+            "remote disconnected",
+            "wrong version number",
+            "certificate verify failed",
+            "ssleoferror",
+            "ssl:",
+            "sslerror",
+        ]
+    )
+
+
 def _detect_auth_error(out: dict[str, Any]) -> str | None:
     if _has_authenticated_read_success(out):
         return None
     if any(_looks_like_auth_error(message) for message in _collect_authenticated_read_errors(out)):
         return "Authentication failed (wrong username or password)."
     return None
+
+
+def _detect_read_error(out: dict[str, Any]) -> str | None:
+    auth_error = _detect_auth_error(out)
+    if auth_error:
+        return auth_error
+    if _has_authenticated_read_success(out):
+        return None
+    if any(_looks_like_connection_error(message) for message in _collect_read_errors(out)):
+        return "Camera could not be reached. Check the IP, port, and HTTP/HTTPS setting."
+    if not _has_axis_identity(out):
+        return "This host did not respond like a supported Axis camera. Check the IP and credentials."
+    return "The camera did not complete an authenticated read. Check the credentials and try again."
 
 
 def _first_channel_item(response: dict | None) -> dict[str, Any] | None:

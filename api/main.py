@@ -28,7 +28,7 @@ try:
         list_interface_options,
         resolve_scan_target,
     )
-    from axis_bulk_config.read_config import read_camera_config, _to_serializable
+    from axis_bulk_config.read_config import read_camera_config, _detect_read_error, _to_serializable
     from axis_bulk_config.stream_profiles import build_stream_profile_payload
     from axis_bulk_config.write_service import (
         apply_daynight_updates,
@@ -206,6 +206,31 @@ def _medium_payload(data: dict, name: str | None) -> dict:
     }
 
 
+def _clear_unverified_read(data: dict[str, Any], error: str) -> dict[str, Any]:
+    data["error"] = error
+    data["summary"] = {
+        "model": None,
+        "firmware": None,
+        "image": {},
+        "stream": [],
+        "overlay": {},
+        "overlay_active": False,
+        "sd_card": "unknown",
+    }
+    data["time_info"] = None
+    data["time_info_v2"] = None
+    data["time_zone_options"] = []
+    data["stream_profiles_structured"] = []
+    data["option_catalog"] = {}
+    data["web_settings_catalog"] = {}
+    data["capabilities"] = None
+    data["network_summary"] = None
+    data["network_config"] = None
+    data["dynamic_overlays"] = None
+    data["latest_firmware"] = None
+    return data
+
+
 def _build_target_dict(c: dict | CameraTarget) -> dict[str, Any]:
     if isinstance(c, CameraTarget):
         return c.model_dump()
@@ -245,29 +270,9 @@ def _read_one_camera_payload(camera: dict[str, Any], cache: dict[str, dict[str, 
     data["username"] = username
     data["password"] = password
     data = _to_serializable(data)
-    auth_error = data.get("auth_error")
-    if auth_error:
-        data["error"] = auth_error
-        data["summary"] = {
-            "model": None,
-            "firmware": None,
-            "image": {},
-            "stream": [],
-            "overlay": {},
-            "overlay_active": False,
-            "sd_card": "unknown",
-        }
-        data["time_info"] = None
-        data["time_info_v2"] = None
-        data["time_zone_options"] = []
-        data["stream_profiles_structured"] = []
-        data["option_catalog"] = {}
-        data["web_settings_catalog"] = {}
-        data["capabilities"] = None
-        data["network_summary"] = None
-        data["network_config"] = None
-        data["dynamic_overlays"] = None
-        data["latest_firmware"] = None
+    read_error = _detect_read_error(data)
+    if read_error:
+        data = _clear_unverified_read(data, read_error)
         return _medium_payload(data, name)
     model = ((data.get("summary") or {}).get("model") or "").strip()
     if model:
