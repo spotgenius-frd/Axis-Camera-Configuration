@@ -12,3 +12,5 @@ web/node_modules/
 web/.next/
 outputs/
 archive/
+.codex-logs/
+.playwright-cli/

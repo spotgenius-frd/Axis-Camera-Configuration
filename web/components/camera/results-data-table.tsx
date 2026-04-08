@@ -29,6 +29,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ResultsEmptyState } from "@/components/camera/results-empty-state";
+import { CameraPreviewThumbnail } from "@/components/camera/camera-preview";
 import type { CameraResult, WriteResult } from "@/lib/camera-types";
 import {
   getCameraDisplayName,
@@ -38,6 +39,7 @@ import {
 } from "@/lib/camera-utils";
 
 type ResultsDataTableProps = {
+  apiBase: string;
   results: CameraResult[];
   lastWriteResults?: WriteResult[] | null;
   lastWriteNeedsRefresh?: boolean;
@@ -52,6 +54,7 @@ type ColumnMeta = {
 };
 
 export function ResultsDataTable({
+  apiBase,
   results,
   lastWriteResults,
   lastWriteNeedsRefresh,
@@ -106,6 +109,22 @@ export function ResultsDataTable({
 
   const columns = useMemo<ColumnDef<CameraResult>[]>(
     () => [
+      {
+        id: "preview",
+        enableSorting: false,
+        meta: {
+          className: "w-[12%]",
+        } satisfies ColumnMeta,
+        header: "Preview",
+        cell: ({ row }) => (
+          <CameraPreviewThumbnail
+            apiBase={apiBase}
+            camera={row.original.connection}
+            placeholderText="Preview unavailable"
+            className="max-w-[144px]"
+          />
+        ),
+      },
       {
         id: "select",
         enableSorting: false,
@@ -280,6 +299,7 @@ export function ResultsDataTable({
       onToggleSelection,
       selectedCameraIps,
       visibleCameraIps,
+      apiBase,
       writeByIp,
     ],
   );
@@ -442,33 +462,39 @@ export function ResultsDataTable({
                 const result = row.original;
                 return (
                   <div key={row.id} className="rounded-xl border bg-background p-4">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-1">
+                    <div className="flex items-start gap-3">
+                      <CameraPreviewThumbnail
+                        apiBase={apiBase}
+                        camera={result.connection}
+                        placeholderText="Preview unavailable"
+                        className="w-28 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1 space-y-1">
                         <p className="font-medium">{getCameraDisplayName(result)}</p>
                         <p className="text-sm text-muted-foreground">
                           {result.camera_ip}
                         </p>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-1.5 justify-end">
-                        <Badge
-                          variant={result.error ? "destructive" : "secondary"}
-                        >
-                          {result.error ? "Failed" : "Ready"}
-                        </Badge>
-                        {writeByIp.get(result.camera_ip) && (
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <Badge
-                            variant={
-                              writeByIp.get(result.camera_ip)!.ok ? "outline" : "destructive"
-                            }
-                            className="text-xs"
+                            variant={result.error ? "destructive" : "secondary"}
                           >
-                            {writeByIp.get(result.camera_ip)!.ok
-                              ? lastWriteNeedsRefresh
-                                ? "Firmware started"
-                                : "Updated"
-                              : "Write failed"}
+                            {result.error ? "Failed" : "Ready"}
                           </Badge>
-                        )}
+                          {writeByIp.get(result.camera_ip) && (
+                            <Badge
+                              variant={
+                                writeByIp.get(result.camera_ip)!.ok ? "outline" : "destructive"
+                              }
+                              className="text-xs"
+                            >
+                              {writeByIp.get(result.camera_ip)!.ok
+                                ? lastWriteNeedsRefresh
+                                  ? "Firmware started"
+                                  : "Updated"
+                                : "Write failed"}
+                            </Badge>
+                          )}
+                        </div>
                       </div>
                     </div>
                     <label className="mt-3 flex items-center gap-2 text-sm text-muted-foreground">

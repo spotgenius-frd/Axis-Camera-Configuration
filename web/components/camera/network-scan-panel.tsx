@@ -20,22 +20,17 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { CameraPreviewThumbnail } from "@/components/camera/camera-preview";
 import type {
   NetworkScanOnboardResult,
   ScanInterfaceOption,
   ScanTarget,
   ScannedAxisDevice,
 } from "@/lib/camera-types";
+import { cn } from "@/lib/utils";
 
 type NetworkScanPanelProps = {
+  apiBase: string;
   interfaceOptions: ScanInterfaceOption[];
   scanTarget: ScanTarget | null;
   devices: ScannedAxisDevice[];
@@ -44,22 +39,22 @@ type NetworkScanPanelProps = {
   selectedDeviceIps: string[];
   interfaceName: string;
   cidr: string;
-  followupUsername: string;
-  followupPassword: string;
   loadingOptions: boolean;
   scanBusy: boolean;
   importBusy: boolean;
   onReloadOptions: () => void;
   onInterfaceNameChange: (value: string) => void;
   onCidrChange: (value: string) => void;
-  onFollowupUsernameChange: (value: string) => void;
-  onFollowupPasswordChange: (value: string) => void;
+  onCredentialChange: (
+    ipAddress: string,
+    field: "username" | "password",
+    value: string,
+  ) => void;
   onToggleSelection: (ip: string, checked: boolean) => void;
   onToggleSelectAll: (checked: boolean) => void;
   onScan: () => void;
   onAddSelected: () => void;
-  onStartSetup: (onboardingPassword: string) => Promise<boolean>;
-  onReadFlagged: (username: string, password: string) => Promise<boolean>;
+  onStartSetup: (newRootPassword?: string) => Promise<boolean>;
 };
 
 function formatPorts(device: ScannedAxisDevice): string {
@@ -73,7 +68,33 @@ function formatPorts(device: ScannedAxisDevice): string {
   return parts.join(" · ") || "Not detected";
 }
 
+function getOnboardingBadgeLabel(result: NetworkScanOnboardResult): string {
+  if (result.status === "ready") {
+    return "Verified";
+  }
+  if (result.status === "verification_failed") {
+    return "Verification failed";
+  }
+  if (result.status === "needs_credentials") {
+    return "Needs credentials";
+  }
+  return "Setup failed";
+}
+
+function needsAutomaticSetup(device: ScannedAxisDevice): boolean {
+  return (
+    device.auth_status === "authenticated" &&
+    (device.auth_path === "initial_admin_required" ||
+      device.auth_path === "legacy_root_pass")
+  );
+}
+
+function getAuthBadgeLabel(device: ScannedAxisDevice): string {
+  return device.auth_status === "authenticated" ? "Authenticated" : "Unauthenticated";
+}
+
 export function NetworkScanPanel({
+  apiBase,
   interfaceOptions,
   scanTarget,
   devices,
@@ -82,25 +103,22 @@ export function NetworkScanPanel({
   selectedDeviceIps,
   interfaceName,
   cidr,
-  followupUsername,
-  followupPassword,
   loadingOptions,
   scanBusy,
   importBusy,
   onReloadOptions,
   onInterfaceNameChange,
   onCidrChange,
-  onFollowupUsernameChange,
-  onFollowupPasswordChange,
+  onCredentialChange,
   onToggleSelection,
   onToggleSelectAll,
   onScan,
   onAddSelected,
   onStartSetup,
-  onReadFlagged,
 }: NetworkScanPanelProps) {
   const allSelected = devices.length > 0 && selectedDeviceIps.length === devices.length;
   const selectedCount = selectedDeviceIps.length;
+  const confirmedCount = devices.filter((device) => device.confidence === "confirmed").length;
   const [setupOpen, setSetupOpen] = useState(false);
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -108,10 +126,25 @@ export function NetworkScanPanel({
   const needsCredentials = (onboardingResults ?? []).filter(
     (result) => result.status === "needs_credentials",
   );
+  const verificationFailures = (onboardingResults ?? []).filter(
+    (result) => result.status === "verification_failed",
+  );
+  const verifiedResults = (onboardingResults ?? []).filter(
+    (result) => result.status === "ready" && result.setup_verified,
+  );
+  const selectedDevices = devices.filter((device) => selectedDeviceIps.includes(device.ip));
+  const selectedNeedingAutoSetup = selectedDevices.filter((device) =>
+    needsAutomaticSetup(device),
+  );
+  const selectedMissingCredentials = selectedDevices.filter(
+    (device) =>
+      device.auth_status === "unauthenticated" &&
+      (!device.username?.trim() || !device.password?.trim()),
+  );
 
   const submitSetup = async () => {
     if (!newPassword.trim()) {
-      setSetupError("Enter the new root password to use for first-time onboarding.");
+      setSetupError("Enter the new root password that will be set on the selected camera(s).");
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -125,6 +158,15 @@ export function NetworkScanPanel({
       setNewPassword("");
       setConfirmPassword("");
     }
+  };
+
+  const beginSetup = async () => {
+    if (selectedNeedingAutoSetup.length > 0) {
+      setSetupError(null);
+      setSetupOpen(true);
+      return;
+    }
+    await onStartSetup();
   };
 
   return (
@@ -144,58 +186,60 @@ export function NetworkScanPanel({
           <Badge variant="secondary">No credentials needed for discovery</Badge>
         </div>
       </CardHeader>
-      <CardContent className="space-y-5">
-        <div className="grid gap-4 xl:grid-cols-12">
-          <div className="space-y-2 xl:col-span-5">
-            <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Interface
-            </Label>
-            <NativeSelect
-              value={interfaceName}
-              onChange={(event) => onInterfaceNameChange(event.target.value)}
-              disabled={loadingOptions || scanBusy || interfaceOptions.length === 0}
-            >
-              {loadingOptions ? (
-                <option value="">Loading interfaces…</option>
-              ) : interfaceOptions.length === 0 ? (
-                <option value="">No usable interface found</option>
-              ) : (
-                interfaceOptions.map((option) => (
-                  <option key={`${option.name}-${option.ip_address}`} value={option.name}>
-                    {option.display_name} · {option.ip_address}
-                  </option>
-                ))
-              )}
-            </NativeSelect>
-          </div>
-          <div className="space-y-2 xl:col-span-4">
-            <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              CIDR
-            </Label>
-            <Input
-              placeholder="192.168.1.0/24"
-              value={cidr}
-              onChange={(event) => onCidrChange(event.target.value)}
-              disabled={loadingOptions || scanBusy}
-            />
-          </div>
-          <div className="space-y-2 xl:col-span-3">
-            <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-              Action
-            </Label>
-            <Button
-              type="button"
-              className="w-full"
-              onClick={onScan}
-              disabled={loadingOptions || scanBusy || !cidr.trim() || !interfaceName.trim()}
-            >
-              {scanBusy ? (
-                <LoaderCircleIcon className="size-4 animate-spin" />
-              ) : (
-                <SearchIcon className="size-4" />
-              )}
-              {scanBusy ? "Scanning..." : "Scan network"}
-            </Button>
+      <CardContent className="space-y-6 pb-6">
+        <div className="rounded-2xl border bg-background px-4 py-4 shadow-sm">
+          <div className="grid gap-4 xl:grid-cols-12">
+            <div className="space-y-2 xl:col-span-5">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Interface
+              </Label>
+              <NativeSelect
+                value={interfaceName}
+                onChange={(event) => onInterfaceNameChange(event.target.value)}
+                disabled={loadingOptions || scanBusy || interfaceOptions.length === 0}
+              >
+                {loadingOptions ? (
+                  <option value="">Loading interfaces…</option>
+                ) : interfaceOptions.length === 0 ? (
+                  <option value="">No usable interface found</option>
+                ) : (
+                  interfaceOptions.map((option) => (
+                    <option key={`${option.name}-${option.ip_address}`} value={option.name}>
+                      {option.display_name} · {option.ip_address}
+                    </option>
+                  ))
+                )}
+              </NativeSelect>
+            </div>
+            <div className="space-y-2 xl:col-span-4">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                CIDR
+              </Label>
+              <Input
+                placeholder="192.168.1.0/24"
+                value={cidr}
+                onChange={(event) => onCidrChange(event.target.value)}
+                disabled={loadingOptions || scanBusy}
+              />
+            </div>
+            <div className="space-y-2 xl:col-span-3">
+              <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Action
+              </Label>
+              <Button
+                type="button"
+                className="w-full"
+                onClick={onScan}
+                disabled={loadingOptions || scanBusy || !cidr.trim() || !interfaceName.trim()}
+              >
+                {scanBusy ? (
+                  <LoaderCircleIcon className="size-4 animate-spin" />
+                ) : (
+                  <SearchIcon className="size-4" />
+                )}
+                {scanBusy ? "Scanning..." : "Scan network"}
+              </Button>
+            </div>
           </div>
         </div>
 
@@ -240,142 +284,36 @@ export function NetworkScanPanel({
           </Alert>
         )}
 
-        <div className="rounded-2xl border bg-muted/20 p-4">
-          <div className="mb-4 flex items-center justify-between gap-3">
+        <div className="rounded-2xl border bg-muted/20 px-4 py-4">
+          <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div className="space-y-1">
-              <p className="text-sm font-medium">First-time onboarding</p>
+              <p className="text-sm font-medium">Authentication readiness</p>
               <p className="text-xs text-muted-foreground">
-                Discovery itself does not require credentials. For first-time
-                devices, the app will set a new <code>root</code> password once
-                you start setup.
+                Discovery is credentialless. The app checks whether each camera
+                can proceed through first-time/default Axis access or whether it
+                needs existing credentials entered inline on that row.
               </p>
             </div>
-            <Badge variant="outline">{selectedCount} selected</Badge>
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="outline">{devices.length} discovered</Badge>
+              <Badge variant="secondary">{selectedCount} selected</Badge>
+              <Badge variant="secondary">{confirmedCount} confirmed</Badge>
+            </div>
           </div>
           <div className="space-y-3 text-sm text-muted-foreground">
             <p>
-              The app will try modern first-time onboarding first, then the
-              official legacy fallback <code>root/pass</code>. Devices that
-              already have credentials will be added and flagged for manual
-              credential entry.
+              The app probes for first-time Axis setup first, then the official
+              legacy fallback <code>root/pass</code>. Rows marked
+              <span className="font-medium text-foreground"> Unauthenticated</span>
+              need the current credentials entered inline before setup can continue.
             </p>
             <p>
-              HTTPS is preferred automatically when the scan detects it.
+              If setup uses first-time or default access, the new
+              <code>root</code> password is collected only when setup begins
+              and will be changed on the camera itself.
             </p>
           </div>
         </div>
-
-        {onboardingResults && onboardingResults.length > 0 && (
-          <div className="rounded-2xl border bg-card/70 p-4">
-            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Setup results</p>
-                <p className="text-xs text-muted-foreground">
-                  Review which cameras were onboarded automatically and which
-                  still need existing credentials.
-                </p>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Badge variant="secondary">
-                  {onboardingResults.filter((result) => result.status === "ready").length} ready
-                </Badge>
-                <Badge variant="outline">
-                  {needsCredentials.length} need credentials
-                </Badge>
-                <Badge variant="destructive">
-                  {onboardingResults.filter((result) => result.status === "failed").length} failed
-                </Badge>
-              </div>
-            </div>
-            <div className="space-y-2">
-              {onboardingResults.map((result) => (
-                <div
-                  key={result.camera_ip}
-                  className="flex flex-col gap-2 rounded-xl border px-3 py-2 sm:flex-row sm:items-center sm:justify-between"
-                >
-                  <div className="space-y-1">
-                    <p className="text-sm font-medium">{result.name || result.camera_ip}</p>
-                    <p className="text-xs text-muted-foreground">{result.camera_ip}</p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <Badge
-                      variant={
-                        result.status === "ready"
-                          ? "secondary"
-                          : result.status === "needs_credentials"
-                            ? "outline"
-                            : "destructive"
-                      }
-                    >
-                      {result.status === "ready"
-                        ? result.auth_path === "legacy_root_pass_updated"
-                          ? "Legacy default normalized"
-                          : result.auth_path === "existing_credentials_required"
-                            ? "Read with existing credentials"
-                            : "First-time setup complete"
-                        : result.status === "needs_credentials"
-                          ? "Needs existing credentials"
-                          : "Setup failed"}
-                    </Badge>
-                    {result.errors.length > 0 && (
-                      <span className="text-xs text-muted-foreground">
-                        {result.errors.join(" · ")}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {needsCredentials.length > 0 && (
-          <div className="rounded-2xl border bg-muted/10 p-4">
-            <div className="mb-4 space-y-1">
-              <p className="text-sm font-medium">Read flagged devices with credentials</p>
-              <p className="text-xs text-muted-foreground">
-                These cameras were discovered successfully, but they already had
-                credentials set. Enter the current shared credentials to read
-                them into the batch.
-              </p>
-            </div>
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Username
-                </Label>
-                <Input
-                  value={followupUsername}
-                  onChange={(event) => onFollowupUsernameChange(event.target.value)}
-                  placeholder="root"
-                  disabled={importBusy}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  Password
-                </Label>
-                <Input
-                  type="password"
-                  value={followupPassword}
-                  onChange={(event) => onFollowupPasswordChange(event.target.value)}
-                  placeholder="Current camera password"
-                  disabled={importBusy}
-                />
-              </div>
-            </div>
-            <div className="mt-4 flex justify-end">
-              <Button
-                type="button"
-                onClick={() => onReadFlagged(followupUsername, followupPassword)}
-                disabled={importBusy || !followupPassword.trim()}
-              >
-                {importBusy ? <LoaderCircleIcon className="size-4 animate-spin" /> : <LockKeyholeIcon className="size-4" />}
-                Read flagged devices
-              </Button>
-            </div>
-          </div>
-        )}
 
         <div className="rounded-2xl border bg-card/70">
           <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
@@ -386,131 +324,315 @@ export function NetworkScanPanel({
                 devices were seen through Axis-specific mDNS only.
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Badge variant="outline">{devices.length} devices</Badge>
-              <Badge variant="secondary">
-                {
-                  devices.filter((device) => device.confidence === "confirmed")
-                    .length
-                }{" "}
-                confirmed
-              </Badge>
+              <Badge variant="secondary">{confirmedCount} confirmed</Badge>
+              {devices.length > 0 && (
+                <>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => onToggleSelectAll(true)}
+                    disabled={allSelected}
+                  >
+                    Select all
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => onToggleSelectAll(false)}
+                    disabled={selectedCount === 0}
+                  >
+                    Clear
+                  </Button>
+                </>
+              )}
             </div>
           </div>
 
           {devices.length === 0 ? (
-            <div className="p-4 text-sm text-muted-foreground">
-              Run a scan to populate this table with Axis devices on the local network.
+            <div className="flex flex-col items-center justify-center gap-3 px-4 py-10 text-center">
+              <div className="rounded-2xl bg-muted p-3 text-muted-foreground">
+                <SearchIcon className="size-5" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium">No discovered devices yet</p>
+                <p className="text-sm text-muted-foreground">
+                  Run a scan to populate this view with Axis devices on the local network.
+                </p>
+              </div>
             </div>
           ) : (
-            <div className="overflow-x-auto px-2 py-2">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-10">
-                      <input
-                        type="checkbox"
-                        role="checkbox"
-                        aria-label="Select all discovered devices"
-                        checked={allSelected}
-                        onChange={(event) => onToggleSelectAll(event.target.checked)}
-                      />
-                    </TableHead>
-                    <TableHead className="w-36">IP</TableHead>
-                    <TableHead>Device</TableHead>
-                    <TableHead className="w-44">Identity</TableHead>
-                    <TableHead className="w-40">Ports</TableHead>
-                    <TableHead className="w-36">Confidence</TableHead>
-                    <TableHead>Sources</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {devices.map((device) => (
-                    <TableRow key={device.ip}>
-                      <TableCell>
-                        <input
-                          type="checkbox"
-                          role="checkbox"
-                          aria-label={`Select ${device.ip}`}
-                          checked={selectedDeviceIps.includes(device.ip)}
-                          onChange={(event) => onToggleSelection(device.ip, event.target.checked)}
+            <div className="space-y-3 px-4 py-4">
+              {devices.map((device) => {
+                const isSelected = selectedDeviceIps.includes(device.ip);
+                return (
+                  <div
+                    key={device.ip}
+                    className={cn(
+                      "rounded-2xl border bg-background px-4 py-4 shadow-sm transition-colors",
+                      isSelected
+                        ? "border-primary/40 bg-primary/5"
+                        : "border-border/70",
+                    )}
+                  >
+                    <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                      <div className="flex min-w-0 gap-3">
+                        <div className="pt-1">
+                          <input
+                            type="checkbox"
+                            role="checkbox"
+                            aria-label={`Select ${device.ip}`}
+                            checked={isSelected}
+                            onChange={(event) =>
+                              onToggleSelection(device.ip, event.target.checked)
+                            }
+                          />
+                        </div>
+                        <CameraPreviewThumbnail
+                          apiBase={apiBase}
+                          scannedDevice={device}
+                          placeholderText={
+                            device.auth_status === "unauthenticated"
+                              ? "Preview after authentication"
+                              : device.auth_path === "legacy_root_pass"
+                                ? "Loading preview"
+                                : "Preview after initial setup"
+                          }
+                          className="w-32 shrink-0"
                         />
-                      </TableCell>
-                      <TableCell className="font-medium">{device.ip}</TableCell>
-                      <TableCell>
-                        <div className="space-y-1">
-                          <p className="font-medium">{device.model || "Axis device"}</p>
+                        <div className="min-w-0 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-semibold text-foreground">
+                              {device.model || "Axis device"}
+                            </p>
+                            <Badge
+                              variant={
+                                device.confidence === "confirmed" ? "secondary" : "outline"
+                              }
+                              className="gap-1"
+                            >
+                              {device.confidence === "confirmed" ? (
+                                <ShieldCheckIcon className="size-3.5" />
+                              ) : (
+                                <InfoIcon className="size-3.5" />
+                              )}
+                              {device.confidence === "confirmed" ? "Confirmed" : "Probable"}
+                            </Badge>
+                            <Badge
+                              variant={
+                                device.auth_status === "authenticated"
+                                  ? "secondary"
+                                  : "outline"
+                              }
+                              className="gap-1"
+                            >
+                              {device.auth_status === "authenticated" ? (
+                                <ShieldCheckIcon className="size-3.5" />
+                              ) : (
+                                <LockKeyholeIcon className="size-3.5" />
+                              )}
+                              {getAuthBadgeLabel(device)}
+                            </Badge>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+                            <span className="font-medium text-foreground">{device.ip}</span>
+                            <span className="text-muted-foreground">
+                              {device.hostname || "Hostname not advertised"}
+                            </span>
+                          </div>
                           <p className="text-xs text-muted-foreground">
-                            {device.hostname || "Hostname not advertised"}
+                            {device.auth_message ||
+                              (device.auth_status === "authenticated"
+                                ? "Automatic setup is available."
+                                : "Existing credentials are required.")}
                           </p>
                         </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="space-y-1 text-xs">
-                          <p>Serial: {device.serial || "—"}</p>
-                          <p>MAC: {device.mac || "—"}</p>
-                          <p>Firmware: {device.firmware || "—"}</p>
+                      </div>
+                      <div className="space-y-1 text-sm text-muted-foreground xl:text-right">
+                        <p>{formatPorts(device)}</p>
+                        <p>{device.discovery_sources.join(", ")}</p>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <div className="space-y-1 rounded-xl bg-muted/35 px-3 py-2">
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                          Serial
+                        </p>
+                        <p className="text-sm">{device.serial || "Unavailable"}</p>
+                      </div>
+                      <div className="space-y-1 rounded-xl bg-muted/35 px-3 py-2">
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                          MAC
+                        </p>
+                        <p className="text-sm">{device.mac || "Unavailable"}</p>
+                      </div>
+                      <div className="space-y-1 rounded-xl bg-muted/35 px-3 py-2">
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                          Firmware
+                        </p>
+                        <p className="text-sm">{device.firmware || "Unavailable"}</p>
+                      </div>
+                      <div className="space-y-1 rounded-xl bg-muted/35 px-3 py-2">
+                        <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                          Discovery
+                        </p>
+                        <p className="text-sm">{device.discovery_sources.join(", ")}</p>
+                      </div>
+                    </div>
+
+                    {device.auth_status === "unauthenticated" && (
+                      <div className="mt-4 rounded-xl border border-amber-300/60 bg-amber-50/60 px-3 py-3 dark:border-amber-900/60 dark:bg-amber-950/20">
+                        <div className="grid gap-3 md:grid-cols-2">
+                          <div className="space-y-2">
+                            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                              Existing username
+                            </Label>
+                            <Input
+                              value={device.username ?? "root"}
+                              onChange={(event) =>
+                                onCredentialChange(device.ip, "username", event.target.value)
+                              }
+                              placeholder="root"
+                              disabled={importBusy}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+                              Existing password
+                            </Label>
+                            <Input
+                              type="password"
+                              value={device.password ?? ""}
+                              onChange={(event) =>
+                                onCredentialChange(device.ip, "password", event.target.value)
+                              }
+                              placeholder="Current camera password"
+                              disabled={importBusy}
+                            />
+                          </div>
                         </div>
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {formatPorts(device)}
-                      </TableCell>
-                      <TableCell>
-                        <Badge
-                          variant={
-                            device.confidence === "confirmed" ? "secondary" : "outline"
-                          }
-                          className="gap-1"
-                        >
-                          {device.confidence === "confirmed" ? (
-                            <ShieldCheckIcon className="size-3.5" />
-                          ) : (
-                            <InfoIcon className="size-3.5" />
-                          )}
-                          {device.confidence === "confirmed" ? "Confirmed" : "Probable"}
-                        </Badge>
-                      </TableCell>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {device.discovery_sources.join(", ")}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                        {isSelected && (!device.username?.trim() || !device.password?.trim()) && (
+                          <p className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                            Enter the existing credentials before starting setup for this selected camera.
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-xs text-muted-foreground">
-            Imported cameras land in the manual-entry batch. Start setup to
-            onboard first-time devices automatically, then continue with IP,
-            password, and camera configuration from the main workflow.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              onClick={onAddSelected}
-              disabled={importBusy || selectedCount === 0}
-            >
-              Add selected to batch
-            </Button>
-            <Button
-              type="button"
-              onClick={() => {
-                setSetupError(null);
-                setSetupOpen(true);
-              }}
-              disabled={importBusy || selectedCount === 0}
-            >
-              {importBusy ? (
-                <LoaderCircleIcon className="size-4 animate-spin" />
-              ) : (
-                <LockKeyholeIcon className="size-4" />
+        {onboardingResults && onboardingResults.length > 0 && (
+          <div className="rounded-2xl border bg-card/70 px-4 py-4">
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Setup results</p>
+                <p className="text-xs text-muted-foreground">
+                  Review which cameras were onboarded automatically and which
+                  still need existing credentials.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Badge variant="secondary">
+                  {verifiedResults.length} verified
+                </Badge>
+                <Badge variant="outline">{verificationFailures.length} need attention</Badge>
+                <Badge variant="outline">
+                  {needsCredentials.length} need credentials
+                </Badge>
+                <Badge variant="destructive">
+                  {onboardingResults.filter((result) => result.status === "failed").length} failed
+                </Badge>
+              </div>
+            </div>
+            <div className="space-y-3">
+              {onboardingResults.map((result) => (
+                <div
+                  key={result.camera_ip}
+                  className="rounded-xl border bg-background px-3 py-3 shadow-sm"
+                >
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="space-y-1">
+                      <p className="text-sm font-medium">{result.name || result.camera_ip}</p>
+                      <p className="text-xs text-muted-foreground">{result.camera_ip}</p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge
+                        variant={
+                          result.status === "ready"
+                            ? "secondary"
+                            : result.status === "verification_failed"
+                              ? "outline"
+                            : result.status === "needs_credentials"
+                              ? "outline"
+                              : "destructive"
+                        }
+                      >
+                        {getOnboardingBadgeLabel(result)}
+                      </Badge>
+                      {(result.setup_message || result.errors.length > 0) && (
+                        <span className="text-xs text-muted-foreground">
+                          {result.setup_message || result.errors.join(" · ")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="sticky bottom-4 z-10 rounded-2xl border bg-background/95 px-4 py-4 shadow-[0_-12px_30px_-18px_rgba(0,0,0,0.35)] backdrop-blur supports-[backdrop-filter]:bg-background/85">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-1">
+              <p className="text-sm font-medium">
+                {selectedCount === 0
+                  ? "Select one or more devices to continue"
+                  : `${selectedCount} device${selectedCount === 1 ? "" : "s"} selected`}
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Imported cameras land in the manual-entry batch. Start setup
+                will use automatic Axis onboarding for authenticated rows and
+                the inline credentials you entered for unauthenticated rows.
+              </p>
+              {selectedMissingCredentials.length > 0 && (
+                <p className="text-xs text-amber-700 dark:text-amber-300">
+                  {selectedMissingCredentials.length} selected camera
+                  {selectedMissingCredentials.length === 1 ? "" : "s"} still
+                  need existing credentials entered before setup can continue.
+                </p>
               )}
-              Add selected and start setup
-            </Button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onAddSelected}
+                disabled={importBusy || selectedCount === 0}
+              >
+                Add selected to batch
+              </Button>
+              <Button
+                type="button"
+                onClick={beginSetup}
+                disabled={importBusy || selectedCount === 0 || selectedMissingCredentials.length > 0}
+              >
+                {importBusy ? (
+                  <LoaderCircleIcon className="size-4 animate-spin" />
+                ) : (
+                  <LockKeyholeIcon className="size-4" />
+                )}
+                Start setup for selected
+              </Button>
+            </div>
           </div>
         </div>
       </CardContent>
@@ -519,10 +641,11 @@ export function NetworkScanPanel({
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/45 px-4">
         <div className="w-full max-w-md rounded-2xl border bg-background p-5 shadow-2xl">
           <div className="space-y-1">
-            <h3 className="text-lg font-semibold">Start first-time setup</h3>
+            <h3 className="text-lg font-semibold">Set a new root password</h3>
             <p className="text-sm text-muted-foreground">
-              Enter the new <code>root</code> password to apply to all selected
-              first-time Axis devices.
+              This password will be set on the selected camera device itself for
+              first-time or legacy-default Axis setup. Cameras using the inline
+              existing credentials will not have their passwords changed.
             </p>
           </div>
           <div className="mt-4 space-y-4">

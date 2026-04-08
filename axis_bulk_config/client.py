@@ -168,6 +168,36 @@ class AxisCameraClient:
         resp.raise_for_status()
         return resp.text
 
+    def snapshot_image(
+        self,
+        *,
+        resolution: str | None = None,
+        camera: int | None = None,
+    ) -> tuple[bytes, str]:
+        """Fetch a still JPEG snapshot through the authenticated session."""
+        url = self._url("jpg/image.cgi")
+        params: dict[str, str | int] = {}
+        if resolution:
+            params["resolution"] = resolution
+        if camera is not None:
+            params["camera"] = camera
+        resp = self._session.get(url, params=params, timeout=self.timeout)
+        if resp.status_code >= 400:
+            raise AxisCameraError(
+                f"Snapshot request failed with HTTP {resp.status_code}",
+                status_code=resp.status_code,
+                body=resp.text,
+            )
+        content_type = resp.headers.get("Content-Type", "")
+        if "image/" not in content_type.lower() and not resp.content.startswith(b"\xff\xd8"):
+            body_preview = resp.text[:200] if resp.text else ""
+            raise AxisCameraError(
+                "Snapshot endpoint did not return an image.",
+                status_code=resp.status_code,
+                body=body_preview,
+            )
+        return resp.content, content_type or "image/jpeg"
+
     def streamprofile_list(self) -> dict[str, Any]:
         """List all stream profiles. Returns JSON with data.streamProfile and data.maxProfiles."""
         url = self._url("streamprofile.cgi")
@@ -644,58 +674,6 @@ class AxisCameraClient:
         )
 
 
-def _handle_pwdgrp_response(resp: requests.Response) -> str:
-    """Validate a pwdgrp.cgi response and raise an AxisCameraError on failure."""
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError as exc:
-        body = resp.text.strip()
-        raise AxisCameraError(
-            f"User management API error: {body or exc}",
-            status_code=resp.status_code,
-            body=body,
-        ) from exc
-
-    body = resp.text.strip()
-    lower = body.lower()
-    if (
-        "error" in lower
-        or "failed" in lower
-        or "not authorized" in lower
-        or "access denied" in lower
-    ):
-        first_line = next((line.strip() for line in body.splitlines() if line.strip()), body)
-        raise AxisCameraError(
-            f"User management API error: {first_line}",
-            status_code=resp.status_code,
-            body=body,
-        )
-    return body
-
-
-def pwdgrp_add_account_unauthenticated(
-    base_url: str,
-    user: str,
-    password: str,
-    timeout: float = 15.0,
-) -> str:
-    """Create the initial device account without prior auth when the device is factory-default."""
-    url = base_url.rstrip("/") + "/axis-cgi/pwdgrp.cgi"
-    resp = requests.post(
-        url,
-        data={
-            "action": "add",
-            "user": user,
-            "pwd": password,
-            "grp": "admin",
-            "sgrp": "admin:operator:viewer:ptz",
-        },
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        timeout=timeout,
-        verify=not base_url.startswith("https://"),
-    )
-    return _handle_pwdgrp_response(resp)
-
     # --- Imaging / day-night / optics / light control ---
 
     def daynight_get_capabilities(self) -> dict[str, Any]:
@@ -835,6 +813,80 @@ def pwdgrp_add_account_unauthenticated(
                 "params": {"lightID": light_id, "enabled": enabled},
             },
         )
+
+
+def _handle_pwdgrp_response(resp: requests.Response) -> str:
+    """Validate a pwdgrp.cgi response and raise an AxisCameraError on failure."""
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        body = resp.text.strip()
+        raise AxisCameraError(
+            f"User management API error: {body or exc}",
+            status_code=resp.status_code,
+            body=body,
+        ) from exc
+
+    body = resp.text.strip()
+    lower = body.lower()
+    if (
+        "error" in lower
+        or "failed" in lower
+        or "not authorized" in lower
+        or "access denied" in lower
+    ):
+        first_line = next((line.strip() for line in body.splitlines() if line.strip()), body)
+        raise AxisCameraError(
+            f"User management API error: {first_line}",
+            status_code=resp.status_code,
+            body=body,
+        )
+    return body
+
+
+def pwdgrp_add_account_unauthenticated(
+    base_url: str,
+    user: str,
+    password: str,
+    timeout: float = 15.0,
+) -> str:
+    """Create the initial device account without prior auth when the device is factory-default."""
+    url = base_url.rstrip("/") + "/axis-cgi/pwdgrp.cgi"
+    resp = requests.post(
+        url,
+        data={
+            "action": "add",
+            "user": user,
+            "pwd": password,
+            "grp": "admin",
+            "sgrp": "admin:operator:viewer:ptz",
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=timeout,
+        verify=not base_url.startswith("https://"),
+    )
+    return _handle_pwdgrp_response(resp)
+
+
+def pwdgrp_probe_initial_admin_required(
+    base_url: str,
+    timeout: float = 15.0,
+) -> bool:
+    """Best-effort read-only probe for first-time devices before an admin account exists."""
+    url = base_url.rstrip("/") + "/axis-cgi/pwdgrp.cgi"
+    resp = requests.post(
+        url,
+        data={"action": "get"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=timeout,
+        verify=not base_url.startswith("https://"),
+    )
+    if resp.status_code in {401, 403}:
+        return False
+    body = resp.text.strip().lower()
+    if resp.ok and "not authorized" not in body and "access denied" not in body:
+        return True
+    return False
 
 
 def parse_param_list(text: str) -> dict[str, str]:

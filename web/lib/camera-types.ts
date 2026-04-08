@@ -200,6 +200,9 @@ export type CameraResult = {
   network_config?: CameraNetworkConfig | null;
   dynamic_overlays?: DynamicOverlayResponse | null;
   latest_firmware?: LatestFirmwareInfo | null;
+  preview_status?: "idle" | "loading" | "ready" | "placeholder" | "error";
+  preview_url?: string | null;
+  preview_error?: string | null;
 };
 
 export type CameraRequestInput = {
@@ -342,6 +345,24 @@ export type ScannedAxisDevice = {
   https_port?: number | null;
   discovery_sources: string[];
   confidence: "confirmed" | "probable";
+  auth_status?: "authenticated" | "unauthenticated";
+  auth_path?:
+    | "initial_admin_required"
+    | "legacy_root_pass"
+    | "existing_credentials_required"
+    | "unknown";
+  auth_message?: string | null;
+  username?: string | null;
+  password?: string | null;
+  preview_status?: "idle" | "loading" | "ready" | "placeholder" | "error";
+  preview_url?: string | null;
+  preview_error?: string | null;
+};
+
+export type CameraPreviewRequest = {
+  camera?: CameraConnection;
+  scanned_device?: ScannedAxisDevice;
+  resolution?: string;
 };
 
 export type NetworkScanRequest = {
@@ -351,15 +372,22 @@ export type NetworkScanRequest = {
 
 export type NetworkScanOnboardRequest = {
   devices: ScannedAxisDevice[];
-  onboarding_password: string;
+  new_root_password?: string;
 };
 
 export type NetworkScanOnboardResult = {
   camera_ip: string;
   name: string | null;
   ok: boolean;
-  status: "ready" | "needs_credentials" | "failed";
-  auth_path: "initial_root_created" | "legacy_root_pass_updated" | "existing_credentials_required" | "none";
+  status: "ready" | "verification_failed" | "needs_credentials" | "failed";
+  setup_verified: boolean;
+  setup_message: string;
+  auth_path:
+    | "first_time_initialized"
+    | "legacy_default_normalized"
+    | "existing_credentials_authenticated"
+    | "existing_credentials_required"
+    | "none";
   errors: string[];
   result?: CameraResult | null;
   connection?: CameraConnection | null;

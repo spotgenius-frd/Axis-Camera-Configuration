@@ -17,7 +17,7 @@ _repo_root = Path(__file__).resolve().parent.parent
 if str(_repo_root) not in sys.path:
     sys.path.insert(0, str(_repo_root))
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -43,8 +43,9 @@ try:
         apply_stream_profile_updates,
         apply_time_zone_update,
         make_client,
-        onboard_scanned_camera,
+        probe_scanned_camera_auth,
         refresh_camera,
+        setup_scanned_camera,
     )
 except ImportError as e:
     raise ImportError(
@@ -154,11 +155,27 @@ class ScannedDeviceInput(BaseModel):
     https_port: int | None = None
     discovery_sources: list[str] = []
     confidence: Literal["confirmed", "probable"] = "probable"
+    auth_status: Literal["authenticated", "unauthenticated"] | None = None
+    auth_path: Literal[
+        "initial_admin_required",
+        "legacy_root_pass",
+        "existing_credentials_required",
+        "unknown",
+    ] | None = None
+    auth_message: str | None = None
+    username: str | None = None
+    password: str | None = None
 
 
 class NetworkScanOnboardRequest(BaseModel):
     devices: list[ScannedDeviceInput]
-    onboarding_password: str
+    new_root_password: str | None = None
+
+
+class CameraPreviewRequest(BaseModel):
+    camera: CameraTarget | None = None
+    scanned_device: ScannedDeviceInput | None = None
+    resolution: str | None = None
 
 
 def _medium_payload(data: dict, name: str | None) -> dict:
@@ -261,6 +278,22 @@ def _read_one_camera_payload(camera: dict[str, Any], cache: dict[str, dict[str, 
     return _medium_payload(data, name)
 
 
+def _scan_setup_message(status: str, auth_path: str) -> str:
+    if status == "ready":
+        if auth_path == "first_time_initialized":
+            return "Password changed on the device and verified with the new credentials."
+        if auth_path == "legacy_default_normalized":
+            return "Legacy default credentials were replaced and verified with the new password."
+        if auth_path == "existing_credentials_authenticated":
+            return "Authenticated successfully with the supplied existing credentials."
+        return "Camera setup completed and was verified successfully."
+    if status == "verification_failed":
+        return "Password may have changed on the device, but the app could not verify the camera afterward."
+    if status == "needs_credentials":
+        return "Existing credentials are required before this camera can be imported as ready."
+    return "Camera setup failed."
+
+
 def _write_result(camera: dict[str, Any], errors: list[str], refreshed: dict[str, Any] | None = None) -> dict[str, Any]:
     result = {
         "camera_ip": camera.get("ip") or "?",
@@ -332,6 +365,74 @@ def _network_scan_metadata(interface_name: str | None = None, cidr: str | None =
     }
 
 
+def _normalize_preview_resolution(value: str | None) -> str:
+    candidate = (value or "").strip() or "320x180"
+    if "x" not in candidate:
+        raise HTTPException(400, "Preview resolution must look like WIDTHxHEIGHT.")
+    width, height = candidate.lower().split("x", 1)
+    if not width.isdigit() or not height.isdigit():
+        raise HTTPException(400, "Preview resolution must look like WIDTHxHEIGHT.")
+    return f"{int(width)}x{int(height)}"
+
+
+def _scan_candidate_connection(device: dict[str, Any], *, username: str, password: str) -> dict[str, Any]:
+    ip = str(device.get("ip") or "").strip()
+    hostname = device.get("hostname") or device.get("model")
+    https_port = device.get("https_port")
+    http_port = device.get("http_port")
+    if isinstance(https_port, int) and https_port > 0:
+        return {
+            "ip": ip,
+            "port": https_port,
+            "scheme": "https",
+            "username": username,
+            "password": password,
+            "name": hostname,
+        }
+    if isinstance(http_port, int) and http_port > 0:
+        return {
+            "ip": ip,
+            "port": http_port,
+            "scheme": "http",
+            "username": username,
+            "password": password,
+            "name": hostname,
+        }
+    return {
+        "ip": ip,
+        "port": 80,
+        "scheme": "http",
+        "username": username,
+        "password": password,
+        "name": hostname,
+    }
+
+
+def _resolve_preview_camera(request: CameraPreviewRequest) -> dict[str, Any]:
+    if request.camera is not None:
+        return request.camera.model_dump()
+    if request.scanned_device is None:
+        raise HTTPException(400, "A camera connection or scanned device is required.")
+
+    scanned = request.scanned_device.model_dump()
+    password = str(scanned.get("password") or "").strip()
+    username = str(scanned.get("username") or "root").strip() or "root"
+    if password:
+        return _scan_candidate_connection(scanned, username=username, password=password)
+    if scanned.get("auth_path") == "legacy_root_pass":
+        return _scan_candidate_connection(scanned, username="root", password="pass")
+    raise HTTPException(400, "Preview available after authentication/setup.")
+
+
+def _enrich_scanned_devices_with_auth(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enriched: list[dict[str, Any]] = []
+    for device in devices:
+        next_device = dict(device)
+        next_device.update(probe_scanned_camera_auth(next_device))
+        enriched.append(next_device)
+    return enriched
+
+
 @app.post("/api/read-config")
 def post_read_config(body: ReadConfigRequest):
     cameras = [
@@ -362,19 +463,20 @@ def post_network_scan(body: NetworkScanRequest):
     scan = discover_axis_devices(interface_name=body.interface_name, cidr=body.cidr)
     if body.cidr and scan["scan_target"] is None:
         raise HTTPException(400, scan["errors"][0])
+    scan["devices"] = _enrich_scanned_devices_with_auth(scan.get("devices", []))
     return scan
 
 
 @app.post("/api/network-scan/onboard")
 def post_network_scan_onboard(body: NetworkScanOnboardRequest):
-    if not body.onboarding_password.strip():
-        raise HTTPException(400, "An onboarding password is required.")
-
     latest_cache: dict[str, dict[str, Any]] = {}
     results: list[dict[str, Any]] = []
     for device_model in body.devices:
         device = device_model.model_dump()
-        onboarding = onboard_scanned_camera(device, body.onboarding_password.strip())
+        onboarding = setup_scanned_camera(
+            device,
+            new_root_password=(body.new_root_password or "").strip() or None,
+        )
         updated_camera = onboarding.get("camera")
         if onboarding.get("status") == "ready" and isinstance(updated_camera, dict):
             refreshed = _read_one_camera_payload(updated_camera, latest_cache)
@@ -384,14 +486,20 @@ def post_network_scan_onboard(body: NetworkScanOnboardRequest):
                         "camera_ip": device.get("ip") or "?",
                         "name": _camera_name(device) or device.get("hostname") or device.get("model"),
                         "ok": False,
-                        "status": "failed",
-                        "auth_path": "none",
-                        "errors": [refreshed.get("error") or "Unable to read the onboarded camera."],
+                        "status": "verification_failed",
+                        "setup_verified": False,
+                        "setup_message": _scan_setup_message(
+                            "verification_failed",
+                            str(onboarding.get("auth_path") or "none"),
+                        ),
+                        "auth_path": onboarding.get("auth_path") or "none",
+                        "errors": [refreshed.get("error") or "Unable to verify the onboarded camera with the new credentials."],
                         "result": None,
                         "connection": None,
                     }
                 )
                 continue
+            mapped_auth_path = onboarding.get("auth_path") or "none"
             connection = dict(refreshed.get("connection") or {})
             results.append(
                 {
@@ -399,7 +507,9 @@ def post_network_scan_onboard(body: NetworkScanOnboardRequest):
                     "name": refreshed.get("name"),
                     "ok": True,
                     "status": "ready",
-                    "auth_path": onboarding.get("auth_path") or "none",
+                    "setup_verified": True,
+                    "setup_message": _scan_setup_message("ready", str(mapped_auth_path)),
+                    "auth_path": mapped_auth_path,
                     "errors": [],
                     "result": refreshed,
                     "connection": connection,
@@ -413,7 +523,7 @@ def post_network_scan_onboard(body: NetworkScanOnboardRequest):
                 "ip": device.get("ip") or "?",
                 "port": device.get("http_port") or device.get("https_port") or 80,
                 "scheme": "http" if device.get("http_port") else ("https" if device.get("https_port") else "http"),
-                "username": "root",
+                "username": device.get("username") or "root",
                 "password": "",
                 "name": device.get("hostname") or device.get("model"),
             }
@@ -423,6 +533,11 @@ def post_network_scan_onboard(body: NetworkScanOnboardRequest):
                 "name": _camera_name(device) or device.get("hostname") or device.get("model"),
                 "ok": bool(onboarding.get("ok")),
                 "status": onboarding.get("status") or "failed",
+                "setup_verified": False,
+                "setup_message": _scan_setup_message(
+                    str(onboarding.get("status") or "failed"),
+                    str(onboarding.get("auth_path") or "none"),
+                ),
                 "auth_path": onboarding.get("auth_path") or "none",
                 "errors": onboarding.get("errors") or [],
                 "result": None,
@@ -430,6 +545,32 @@ def post_network_scan_onboard(body: NetworkScanOnboardRequest):
             }
         )
     return {"results": results}
+
+
+@app.post("/api/camera-preview")
+def post_camera_preview(body: CameraPreviewRequest):
+    camera = _resolve_preview_camera(body)
+    resolution = _normalize_preview_resolution(body.resolution)
+    try:
+        client = make_client(camera, timeout=20.0)
+        image_bytes, content_type = client.snapshot_image(resolution=resolution)
+        return Response(
+            content=image_bytes,
+            media_type=content_type or "image/jpeg",
+            headers={"Cache-Control": "private, max-age=15"},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        message = str(exc)
+        lowered = message.lower()
+        if "http 401" in lowered or "unauthorized" in lowered or "authentication failed" in lowered:
+            raise HTTPException(401, "Authentication failed while fetching the camera preview.")
+        if "did not return an image" in lowered:
+            raise HTTPException(502, "The camera preview endpoint did not return an image.")
+        if "http 404" in lowered:
+            raise HTTPException(404, "Preview snapshot is not available on this camera.")
+        raise HTTPException(502, f"Unable to fetch camera preview: {message}")
 
 
 @app.post("/api/read-config/upload")

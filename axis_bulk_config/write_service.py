@@ -17,6 +17,7 @@ from axis_bulk_config.client import (
     check_param_update_response,
     param_update_key_variants,
     pwdgrp_add_account_unauthenticated,
+    pwdgrp_probe_initial_admin_required,
 )
 from axis_bulk_config.network_config import (
     normalize_network_config,
@@ -141,6 +142,95 @@ def _sanitize_error_messages(messages: list[str], secret: str) -> list[str]:
     return [sanitize_secret(message, secret) for message in messages]
 
 
+def probe_scanned_camera_auth(device: dict[str, Any]) -> dict[str, str]:
+    """Classify whether a scanned device can be set up automatically."""
+    candidates = _candidate_scan_connections(device)
+
+    for candidate in candidates:
+        try:
+            if pwdgrp_probe_initial_admin_required(
+                base_url(candidate["ip"], candidate["port"], candidate["scheme"])
+            ):
+                return {
+                    "auth_status": "authenticated",
+                    "auth_path": "initial_admin_required",
+                    "auth_message": "First-time setup available.",
+                }
+        except Exception:
+            continue
+
+    for candidate in candidates:
+        legacy_camera = dict(candidate)
+        legacy_camera["password"] = "pass"
+        try:
+            make_client(legacy_camera).pwdgrp_get_accounts()
+            return {
+                "auth_status": "authenticated",
+                "auth_path": "legacy_root_pass",
+                "auth_message": "Legacy default root/pass works.",
+            }
+        except Exception:
+            continue
+
+    return {
+        "auth_status": "unauthenticated",
+        "auth_path": "existing_credentials_required",
+        "auth_message": "Existing credentials required.",
+    }
+
+
+def authenticate_scanned_camera(device: dict[str, Any]) -> dict[str, Any]:
+    """Authenticate an already-configured scanned camera with operator-supplied credentials."""
+    ip = str(device.get("ip") or "?")
+    name = _scanned_device_name(device)
+    username = str(device.get("username") or "root").strip() or "root"
+    password = str(device.get("password") or "")
+    if not password.strip():
+        return {
+            "camera_ip": ip,
+            "name": name,
+            "ok": False,
+            "status": "failed",
+            "auth_path": "none",
+            "errors": ["Enter the existing credentials for this camera."],
+        }
+
+    errors: list[str] = []
+    for candidate in _candidate_scan_connections(device):
+        configured = dict(candidate)
+        configured["username"] = username
+        configured["password"] = password
+        try:
+            refreshed = refresh_camera(configured)
+            auth_error = refreshed.get("auth_error")
+            if auth_error:
+                errors.append(auth_error)
+                continue
+            return {
+                "camera_ip": ip,
+                "name": name,
+                "ok": True,
+                "status": "ready",
+                "auth_path": "existing_credentials_authenticated",
+                "errors": [],
+                "camera": configured,
+            }
+        except Exception as exc:
+            errors.append(str(exc))
+
+    return {
+        "camera_ip": ip,
+        "name": name,
+        "ok": False,
+        "status": "failed",
+        "auth_path": "none",
+        "errors": _sanitize_error_messages(
+            errors[-2:] or ["Authentication failed with the supplied credentials."],
+            password,
+        ),
+    }
+
+
 def onboard_scanned_camera(device: dict[str, Any], onboarding_password: str) -> dict[str, Any]:
     """Try to onboard a scanned Axis device for first-time setup."""
     ip = str(device.get("ip") or "?")
@@ -245,6 +335,64 @@ def onboard_scanned_camera(device: dict[str, Any], onboarding_password: str) -> 
         "auth_path": "none",
         "errors": _sanitize_error_messages(onboarding_errors[-2:] or ["Unable to onboard this camera."], onboarding_password),
     }
+
+
+def setup_scanned_camera(
+    device: dict[str, Any],
+    *,
+    new_root_password: str | None = None,
+) -> dict[str, Any]:
+    """Set up a scanned camera using either default/first-time access or provided credentials."""
+    auth_path = str(device.get("auth_path") or "").strip()
+    auth_status = str(device.get("auth_status") or "").strip()
+    supplied_password = str(device.get("password") or "")
+
+    if supplied_password.strip():
+        return authenticate_scanned_camera(device)
+
+    if auth_status == "authenticated" and auth_path in {
+        "initial_admin_required",
+        "legacy_root_pass",
+    }:
+        normalized_password = str(new_root_password or "").strip()
+        if not normalized_password:
+            return {
+                "camera_ip": str(device.get("ip") or "?"),
+                "name": _scanned_device_name(device),
+                "ok": False,
+                "status": "failed",
+                "auth_path": "none",
+                "errors": ["A new root password is required to set up this camera."],
+            }
+        onboarding = onboard_scanned_camera(device, normalized_password)
+        if onboarding.get("ok"):
+            mapped_path = (
+                "first_time_initialized"
+                if onboarding.get("auth_path") == "initial_root_created"
+                else "legacy_default_normalized"
+                if onboarding.get("auth_path") == "legacy_root_pass_updated"
+                else onboarding.get("auth_path") or "none"
+            )
+            onboarding["auth_path"] = mapped_path
+        return onboarding
+
+    if auth_path == "existing_credentials_required":
+        return {
+            "camera_ip": str(device.get("ip") or "?"),
+            "name": _scanned_device_name(device),
+            "ok": False,
+            "status": "needs_credentials",
+            "auth_path": "existing_credentials_required",
+            "errors": ["Enter the existing credentials for this camera to continue."],
+        }
+
+    refreshed_probe = probe_scanned_camera_auth(device)
+    device_with_probe = dict(device)
+    device_with_probe.update(refreshed_probe)
+    return setup_scanned_camera(
+        device_with_probe,
+        new_root_password=new_root_password,
+    )
 
 
 def apply_password_change(camera: dict[str, Any], new_password: str) -> dict[str, Any]:

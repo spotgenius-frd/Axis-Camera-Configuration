@@ -133,6 +133,10 @@ export default function Home() {
   const [results, setResults] = useState<CameraResult[] | null>(null);
   const [selectedResult, setSelectedResult] = useState<CameraResult | null>(null);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [detailSetupNotice, setDetailSetupNotice] = useState<{
+    cameraIp: string;
+    message: string;
+  } | null>(null);
   const [runningMode, setRunningMode] = useState<"manual" | "upload" | null>(
     null,
   );
@@ -162,8 +166,6 @@ export default function Home() {
   const [scanCidr, setScanCidr] = useState("");
   const [scanOnboardResults, setScanOnboardResults] =
     useState<NetworkScanOnboardResult[] | null>(null);
-  const [scanFollowupUsername, setScanFollowupUsername] = useState("root");
-  const [scanFollowupPassword, setScanFollowupPassword] = useState("");
   const [scanLoadingOptions, setScanLoadingOptions] = useState(false);
   const [scanOptionsLoaded, setScanOptionsLoaded] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
@@ -189,12 +191,19 @@ export default function Home() {
   const setScanResponse = useCallback((data: NetworkScanResponse) => {
     setScanInterfaceOptions(data.interface_options);
     setScanTarget(data.scan_target ?? null);
-    setScanDevices(data.devices);
+    setScanDevices(
+      data.devices.map((device) => ({
+        ...device,
+        username:
+          device.auth_status === "unauthenticated"
+            ? (device.username?.trim() || "root")
+            : (device.username?.trim() || "root"),
+        password: "",
+      })),
+    );
     setScanErrors(data.errors);
     setScanSelectedIps([]);
     setScanOnboardResults(null);
-    setScanFollowupPassword("");
-    setScanFollowupUsername("root");
     setScanInterfaceName(
       data.scan_target?.interface_name ??
         data.interface_options[0]?.name ??
@@ -246,21 +255,13 @@ export default function Home() {
   };
 
   const openResultDetails = (result: CameraResult) => {
+    setDetailSetupNotice(null);
     setSelectedResult(result);
     setDetailOpen(true);
   };
 
   const getSelectedScannedDevices = (): ScannedAxisDevice[] =>
     scanDevices.filter((device) => scanSelectedIps.includes(device.ip));
-
-  const getFlaggedScannedDevices = (): ScannedAxisDevice[] => {
-    const flaggedIps = new Set(
-      (scanOnboardResults ?? [])
-        .filter((result) => result.status === "needs_credentials")
-        .map((result) => result.camera_ip),
-    );
-    return scanDevices.filter((device) => flaggedIps.has(device.ip));
-  };
 
   const connectionToRequestInput = (c: CameraConnection): CameraRequestInput => ({
     ip: c.ip,
@@ -300,9 +301,10 @@ export default function Home() {
       name: entry.name,
       connection,
       error:
-        entry.status === "needs_credentials"
+        entry.setup_message ||
+        (entry.status === "needs_credentials"
           ? "Existing credentials required before this camera can be read."
-          : entry.errors.join(" ") || "Camera onboarding failed.",
+          : entry.errors.join(" ") || "Camera onboarding failed."),
       summary: {
         model: fallbackDevice?.model ?? null,
         firmware: fallbackDevice?.firmware ?? null,
@@ -328,7 +330,10 @@ export default function Home() {
     selectedDevices: ScannedAxisDevice[],
   ) => {
     const deviceByIp = new Map(selectedDevices.map((device) => [device.ip, device]));
-    const importedRows = response.results.map((entry) => {
+    const verifiedEntries = response.results.filter(
+      (entry) => entry.status === "ready" && entry.setup_verified,
+    );
+    const importedRows = verifiedEntries.map((entry) => {
       const fallbackDevice = deviceByIp.get(entry.camera_ip);
       const connection = entry.connection;
       if (connection) {
@@ -354,27 +359,79 @@ export default function Home() {
         "root",
         "",
       );
-    });
+      });
     const merged = mergeImportedRows(manualRows, importedRows);
     setManualRows(merged.rows);
-    setResults(response.results.map((entry) => onboardingResultToCameraResult(entry, deviceByIp.get(entry.camera_ip))));
-    setSelectedCameraIps([]);
-    setSelectedResult(
-      response.results.length > 0
-        ? onboardingResultToCameraResult(
-            response.results[0],
-            deviceByIp.get(response.results[0].camera_ip),
-          )
-        : null,
+    const verifiedResults = verifiedEntries.map((entry) =>
+      onboardingResultToCameraResult(entry, deviceByIp.get(entry.camera_ip)),
     );
+    setResults((current) => {
+      if (verifiedResults.length === 0) {
+        return current;
+      }
+      if (!current || current.length === 0) {
+        return verifiedResults;
+      }
+      const byIp = new Map(verifiedResults.map((result) => [result.camera_ip, result]));
+      const next = current.map((result) => byIp.get(result.camera_ip) ?? result);
+      for (const result of verifiedResults) {
+        if (!current.some((currentResult) => currentResult.camera_ip === result.camera_ip)) {
+          next.push(result);
+        }
+      }
+      return next;
+    });
+    setSelectedCameraIps([]);
+    if (verifiedResults.length > 0) {
+      setSelectedResult(verifiedResults[0]);
+      setDetailOpen(true);
+      setDetailSetupNotice({
+        cameraIp: verifiedResults[0].camera_ip,
+        message:
+          verifiedEntries[0]?.setup_message ||
+          "Password changed on the device and verified.",
+      });
+    } else {
+      setSelectedResult(null);
+      setDetailOpen(false);
+      setDetailSetupNotice(null);
+    }
     setLastWriteResults(null);
     setLastWriteNeedsRefresh(false);
     setLastWriteScope(null);
     setLastPasswordChangeResults(null);
     setLastPasswordChangeScope(null);
     setScanOnboardResults(response.results);
-    setInputWorkspaceCollapsed(response.results.length > 0);
-    setActiveTab("manual");
+    setScanDevices((current) =>
+      current.map((device) => {
+        const match = response.results.find((entry) => entry.camera_ip === device.ip);
+        if (!match) {
+          return device;
+        }
+        if (match.status === "ready" && match.connection) {
+          return {
+            ...device,
+            username: match.connection.username,
+            password: match.connection.password,
+            auth_status: "authenticated",
+            auth_message:
+              match.setup_message ||
+              (match.auth_path === "existing_credentials_authenticated"
+                ? "Authenticated with existing credentials."
+                : "Setup completed successfully."),
+          };
+        }
+        if (match.status === "verification_failed") {
+          return {
+            ...device,
+            auth_message: match.setup_message || "Password may have changed, but verification failed.",
+          };
+        }
+        return device;
+      }),
+    );
+    setInputWorkspaceCollapsed(false);
+    setActiveTab("scan");
     return merged;
   };
 
@@ -485,6 +542,25 @@ export default function Home() {
 
   const toggleAllScannedDevices = (checked: boolean) => {
     setScanSelectedIps(checked ? scanDevices.map((device) => device.ip) : []);
+  };
+
+  const updateScannedDeviceCredentials = (
+    ipAddress: string,
+    field: "username" | "password",
+    value: string,
+  ) => {
+    setScanDevices((current) =>
+      current.map((device) =>
+        device.ip === ipAddress ? { ...device, [field]: value } : device,
+      ),
+    );
+    setScanOnboardResults((current) =>
+      current?.map((result) =>
+        result.camera_ip === ipAddress && result.status !== "ready"
+          ? { ...result, errors: [], status: "needs_credentials", auth_path: "existing_credentials_required" }
+          : result,
+      ) ?? null,
+    );
   };
 
   const submitWrite = async (
@@ -953,7 +1029,7 @@ export default function Home() {
     }
   };
 
-  const importScannedDevices = async (readNow: boolean) => {
+  const importScannedDevices = async () => {
     const selectedDevices = getSelectedScannedDevices();
     if (selectedDevices.length === 0) {
       toast.error("No devices selected", {
@@ -964,27 +1040,27 @@ export default function Home() {
 
     setScanImportBusy(true);
     const importedRows = selectedDevices.map((device) =>
-      scannedDeviceToRow(device, "root", ""),
+      scannedDeviceToRow(
+        device,
+        device.username?.trim() || "root",
+        device.password ?? "",
+      ),
     );
     const merged = mergeImportedRows(manualRows, importedRows);
     setManualRows(merged.rows);
     setActiveTab("manual");
     setInputWorkspaceCollapsed(false);
-
-    if (!readNow) {
-      setScanImportBusy(false);
-      toast.success("Devices imported", {
-        description:
-          merged.skipped > 0
-            ? `${merged.added} added, ${merged.skipped} skipped because they already exist in the manual batch.`
-            : `${merged.added} device(s) added to the manual batch.`,
-      });
-      setLiveMessage(`Imported ${merged.added} camera(s) from network scan.`);
-      return;
-    }
+    setScanImportBusy(false);
+    toast.success("Devices imported", {
+      description:
+        merged.skipped > 0
+          ? `${merged.added} added, ${merged.skipped} skipped because they already exist in the manual batch.`
+          : `${merged.added} device(s) added to the manual batch.`,
+    });
+    setLiveMessage(`Imported ${merged.added} camera(s) from network scan.`);
   };
 
-  const startSetupScannedDevices = async (onboardingPassword: string) => {
+  const startSetupScannedDevices = async (newRootPassword = "") => {
     const selectedDevices = getSelectedScannedDevices();
     if (selectedDevices.length === 0) {
       toast.error("No devices selected", {
@@ -992,148 +1068,62 @@ export default function Home() {
       });
       return false;
     }
-    if (!onboardingPassword.trim()) {
+
+    const unauthenticatedSelected = selectedDevices.filter(
+      (device) => device.auth_status === "unauthenticated",
+    );
+    const missingCredentials = unauthenticatedSelected.filter(
+      (device) =>
+        !(device.username?.trim() || "root").trim() || !String(device.password ?? "").trim(),
+    );
+    if (missingCredentials.length > 0) {
+      toast.error("Credentials required", {
+        description: "Enter the existing username and password on each unauthenticated row before continuing.",
+      });
+      return false;
+    }
+
+    const autoSetupSelected = selectedDevices.filter((device) =>
+      device.auth_status === "authenticated" &&
+      (device.auth_path === "initial_admin_required" ||
+        device.auth_path === "legacy_root_pass"),
+    );
+    if (autoSetupSelected.length > 0 && !newRootPassword.trim()) {
       toast.error("Password required", {
-        description: "Enter the new root password to use for first-time onboarding.",
+        description: "Enter the new root password to use for the selected first-time or default-password devices.",
       });
       return false;
     }
 
     setScanImportBusy(true);
     setRequestError(null);
-    setLiveMessage(`Starting first-time setup for ${selectedDevices.length} scanned camera(s).`);
+    setLiveMessage(`Starting setup for ${selectedDevices.length} scanned camera(s).`);
     try {
       const response = await onboardScannedDevices(resolvedApiBase, {
         devices: selectedDevices,
-        onboarding_password: onboardingPassword.trim(),
+        new_root_password: newRootPassword.trim() || undefined,
       });
       const merged = mergeOnboardingResponse(response, selectedDevices);
-      const ready = response.results.filter((item) => item.status === "ready").length;
+      const ready = response.results.filter(
+        (item) => item.status === "ready" && item.setup_verified,
+      ).length;
+      const verificationFailed = response.results.filter(
+        (item) => item.status === "verification_failed",
+      ).length;
       const needsCredentials = response.results.filter((item) => item.status === "needs_credentials").length;
       const failed = response.results.filter((item) => item.status === "failed").length;
       toast.success("Scan setup complete", {
         description:
           merged.skipped > 0
-            ? `${ready} ready, ${needsCredentials} need credentials, ${failed} failed. ${merged.skipped} duplicates were skipped in manual rows.`
-            : `${ready} ready, ${needsCredentials} need credentials, ${failed} failed.`,
+            ? `${ready} verified, ${verificationFailed} need attention, ${needsCredentials} need credentials, ${failed} failed. ${merged.skipped} duplicates were skipped in manual rows.`
+            : `${ready} verified, ${verificationFailed} need attention, ${needsCredentials} need credentials, ${failed} failed.`,
       });
       setLiveMessage(
-        `Scan setup complete. ${ready} ready, ${needsCredentials} need credentials, ${failed} failed.`,
+        `Scan setup complete. ${ready} verified, ${verificationFailed} need attention, ${needsCredentials} need credentials, ${failed} failed.`,
       );
       return true;
     } catch (error) {
       handleFailure(error, "Scan setup");
-      return false;
-    } finally {
-      setScanImportBusy(false);
-    }
-  };
-
-  const readFlaggedScannedDevices = async (username: string, password: string) => {
-    const flaggedDevices = getFlaggedScannedDevices();
-    if (flaggedDevices.length === 0) {
-      toast.error("No flagged devices", {
-        description: "Run setup first or select devices that still need credentials.",
-      });
-      return false;
-    }
-    if (!password.trim()) {
-      toast.error("Password required", {
-        description: "Enter the current password for the flagged cameras.",
-      });
-      return false;
-    }
-
-    setScanImportBusy(true);
-    setRequestError(null);
-    setLiveMessage(`Reading ${flaggedDevices.length} flagged camera(s) with provided credentials.`);
-    try {
-      const cameras: CameraRequestInput[] = flaggedDevices.map((device) => {
-        const prefersHttp = typeof device.http_port === "number" && device.http_port > 0;
-        let preferredPort: number | undefined;
-        if (prefersHttp) {
-          preferredPort = device.http_port ?? undefined;
-        } else if (typeof device.https_port === "number" && device.https_port > 0) {
-          preferredPort = device.https_port;
-        }
-        const scheme: "http" | "https" = prefersHttp
-          ? "http"
-          : preferredPort
-            ? "https"
-            : "http";
-        return {
-          ip: device.ip,
-          username: username.trim() || "root",
-          password: password.trim(),
-          port: preferredPort,
-          scheme,
-          name: (device.hostname || device.model || "").trim() || undefined,
-        };
-      });
-      const data = await readConfigFromManual(resolvedApiBase, cameras);
-      setResults((current) => {
-        if (!current) {
-          return data.results;
-        }
-        const byIp = new Map(data.results.map((result) => [result.camera_ip, result]));
-        return current.map((result) => byIp.get(result.camera_ip) ?? result);
-      });
-      setSelectedResult((current) => {
-        if (!current) {
-          return data.results[0] ?? null;
-        }
-        return data.results.find((result) => result.camera_ip === current.camera_ip) ?? current;
-      });
-      setScanOnboardResults((current) =>
-        (current ?? []).map((entry) => {
-          const refreshed = data.results.find((result) => result.camera_ip === entry.camera_ip);
-          if (!refreshed) {
-            return entry;
-          }
-          if (refreshed.error) {
-            return {
-              ...entry,
-              ok: false,
-              status: "failed",
-              auth_path: "none",
-              errors: [refreshed.error],
-              result: null,
-              connection: refreshed.connection ?? entry.connection ?? null,
-            };
-          }
-          return {
-            ...entry,
-            ok: true,
-            status: "ready",
-            auth_path: entry.auth_path === "existing_credentials_required" ? "existing_credentials_required" : entry.auth_path,
-            errors: [],
-            result: refreshed,
-            connection: refreshed.connection ?? entry.connection ?? null,
-          };
-        }),
-      );
-      setManualRows((currentRows) =>
-        currentRows.map((row) => {
-          const refreshed = data.results.find((result) => result.camera_ip === row.ip);
-          if (!refreshed?.connection) {
-            return row;
-          }
-          return {
-            ...row,
-            port: String(refreshed.connection.port ?? row.port ?? "80"),
-            scheme: refreshed.connection.scheme ?? row.scheme ?? "http",
-            username: refreshed.connection.username,
-            password: refreshed.connection.password,
-          };
-        }),
-      );
-      toast.success("Flagged cameras read", {
-        description: `${data.results.length} camera(s) refreshed with the supplied credentials.`,
-      });
-      setLiveMessage(`Flagged cameras refreshed with supplied credentials.`);
-      return true;
-    } catch (error) {
-      handleFailure(error, "Read flagged cameras");
       return false;
     } finally {
       setScanImportBusy(false);
@@ -1160,11 +1150,14 @@ export default function Home() {
             className={
               inputWorkspaceCollapsed
                 ? "min-w-0 space-y-5"
-                : "grid gap-6 2xl:gap-8 xl:grid-cols-[minmax(460px,580px)_minmax(0,1fr)]"
+                : activeTab === "scan"
+                  ? "min-w-0 space-y-5"
+                  : "grid gap-6 2xl:gap-8 xl:grid-cols-[minmax(460px,580px)_minmax(0,1fr)]"
             }
           >
             {!inputWorkspaceCollapsed && (
               <InputWorkspace
+                apiBase={resolvedApiBase}
                 collapsed={false}
                 onCollapsedChange={setInputWorkspaceCollapsed}
                 activeTab={activeTab}
@@ -1189,8 +1182,6 @@ export default function Home() {
                 selectedScanIps={scanSelectedIps}
                 scanInterfaceName={scanInterfaceName}
                 scanCidr={scanCidr}
-                scanFollowupUsername={scanFollowupUsername}
-                scanFollowupPassword={scanFollowupPassword}
                 onAddRow={addCamera}
                 onUpdateRow={updateRow}
                 onRemoveRow={removeRow}
@@ -1205,8 +1196,7 @@ export default function Home() {
                   }
                 }}
                 onScanCidrChange={setScanCidr}
-                onScanFollowupUsernameChange={setScanFollowupUsername}
-                onScanFollowupPasswordChange={setScanFollowupPassword}
+                onScanCredentialChange={updateScannedDeviceCredentials}
                 onToggleScannedDevice={toggleScannedDevice}
                 onToggleAllScannedDevices={toggleAllScannedDevices}
                 onReloadScanOptions={() =>
@@ -1216,9 +1206,8 @@ export default function Home() {
                   })
                 }
                 onSubmitNetworkScan={submitNetworkScan}
-                onImportScannedDevices={() => importScannedDevices(false)}
+                onImportScannedDevices={importScannedDevices}
                 onStartScanSetup={startSetupScannedDevices}
-                onReadFlaggedScannedDevices={readFlaggedScannedDevices}
               />
             )}
 
@@ -1364,6 +1353,7 @@ export default function Home() {
                     onUploadFirmware={uploadBulkFirmware}
                   />
                   <ResultsDataTable
+                    apiBase={resolvedApiBase}
                     results={results}
                     lastWriteResults={lastWriteResults}
                     lastWriteNeedsRefresh={lastWriteNeedsRefresh}
@@ -1393,9 +1383,20 @@ export default function Home() {
       </main>
 
       <CameraDetailSheet
+        apiBase={resolvedApiBase}
         result={selectedResult}
         open={detailOpen}
-        onOpenChange={setDetailOpen}
+        onOpenChange={(open) => {
+          setDetailOpen(open);
+          if (!open) {
+            setDetailSetupNotice(null);
+          }
+        }}
+        setupNotice={
+          selectedResult && detailSetupNotice?.cameraIp === selectedResult.camera_ip
+            ? detailSetupNotice.message
+            : null
+        }
         busy={writeBusy || networkBusy || passwordBusy}
         refreshInProgress={refreshInProgress}
         lastWriteResult={

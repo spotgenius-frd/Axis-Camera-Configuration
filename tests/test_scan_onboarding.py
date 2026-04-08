@@ -2,7 +2,11 @@ import unittest
 from unittest.mock import patch
 
 from axis_bulk_config.client import AxisCameraError
-from axis_bulk_config.write_service import onboard_scanned_camera
+from axis_bulk_config.write_service import (
+    onboard_scanned_camera,
+    probe_scanned_camera_auth,
+    setup_scanned_camera,
+)
 
 
 class _LegacyClient:
@@ -25,6 +29,64 @@ class _LegacyClient:
 
 
 class ScanOnboardingServiceTest(unittest.TestCase):
+    @patch("axis_bulk_config.write_service.pwdgrp_probe_initial_admin_required", return_value=True)
+    def test_probe_scanned_camera_auth_first_time_available(self, _probe):
+        result = probe_scanned_camera_auth(
+            {"ip": "192.168.1.40", "hostname": "axis-new", "https_port": 443}
+        )
+
+        self.assertEqual(result["auth_status"], "authenticated")
+        self.assertEqual(result["auth_path"], "initial_admin_required")
+
+    @patch("axis_bulk_config.write_service.make_client")
+    @patch("axis_bulk_config.write_service.pwdgrp_probe_initial_admin_required", return_value=False)
+    def test_probe_scanned_camera_auth_legacy_root_pass(self, _probe, make_client):
+        make_client.return_value = _LegacyClient()
+
+        result = probe_scanned_camera_auth(
+            {"ip": "192.168.1.50", "hostname": "axis-legacy", "http_port": 80}
+        )
+
+        self.assertEqual(result["auth_status"], "authenticated")
+        self.assertEqual(result["auth_path"], "legacy_root_pass")
+
+    @patch("axis_bulk_config.write_service.make_client")
+    @patch("axis_bulk_config.write_service.pwdgrp_probe_initial_admin_required", return_value=False)
+    def test_probe_scanned_camera_auth_existing_credentials_required(self, _probe, make_client):
+        make_client.return_value = _LegacyClient(
+            get_error=AxisCameraError("unauthorized", status_code=401)
+        )
+
+        result = probe_scanned_camera_auth(
+            {"ip": "192.168.1.60", "hostname": "axis-configured", "http_port": 80}
+        )
+
+        self.assertEqual(result["auth_status"], "unauthenticated")
+        self.assertEqual(result["auth_path"], "existing_credentials_required")
+
+    @patch("axis_bulk_config.write_service.refresh_camera")
+    def test_setup_scanned_camera_existing_credentials_success(self, refresh_camera):
+        refresh_camera.return_value = {
+            "camera_ip": "192.168.1.70",
+            "summary": {"model": "AXIS configured"},
+        }
+
+        result = setup_scanned_camera(
+            {
+                "ip": "192.168.1.70",
+                "hostname": "axis-configured",
+                "http_port": 80,
+                "auth_status": "unauthenticated",
+                "auth_path": "existing_credentials_required",
+                "username": "root",
+                "password": "KnownPassword1!",
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["auth_path"], "existing_credentials_authenticated")
+
     @patch("axis_bulk_config.write_service.refresh_camera")
     @patch("axis_bulk_config.write_service.pwdgrp_add_account_unauthenticated")
     def test_onboard_scanned_camera_modern_factory_default_success(
@@ -58,7 +120,7 @@ class ScanOnboardingServiceTest(unittest.TestCase):
     @patch("axis_bulk_config.write_service.refresh_camera")
     @patch("axis_bulk_config.write_service.make_client")
     @patch("axis_bulk_config.write_service.pwdgrp_add_account_unauthenticated")
-    def test_onboard_scanned_camera_legacy_root_pass_success(
+    def test_setup_scanned_camera_maps_legacy_default_flow(
         self,
         pwdgrp_add_account_unauthenticated,
         make_client,
@@ -74,47 +136,20 @@ class ScanOnboardingServiceTest(unittest.TestCase):
             "summary": {"model": "AXIS legacy"},
         }
 
-        result = onboard_scanned_camera(
+        result = setup_scanned_camera(
             {
                 "ip": "192.168.1.50",
                 "hostname": "axis-legacy",
                 "http_port": 80,
+                "auth_status": "authenticated",
+                "auth_path": "legacy_root_pass",
             },
-            "Spotgenius1!",
+            new_root_password="Spotgenius1!",
         )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "ready")
-        self.assertEqual(result["auth_path"], "legacy_root_pass_updated")
-        self.assertEqual(result["camera"]["password"], "Spotgenius1!")
-
-    @patch("axis_bulk_config.write_service.make_client")
-    @patch("axis_bulk_config.write_service.pwdgrp_add_account_unauthenticated")
-    def test_onboard_scanned_camera_needs_existing_credentials(
-        self,
-        pwdgrp_add_account_unauthenticated,
-        make_client,
-    ):
-        pwdgrp_add_account_unauthenticated.side_effect = AxisCameraError(
-            "not authorized",
-            status_code=401,
-        )
-        make_client.return_value = _LegacyClient(
-            get_error=AxisCameraError("unauthorized", status_code=401)
-        )
-
-        result = onboard_scanned_camera(
-            {
-                "ip": "192.168.1.60",
-                "hostname": "axis-configured",
-                "http_port": 80,
-            },
-            "Spotgenius1!",
-        )
-
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["status"], "needs_credentials")
-        self.assertEqual(result["auth_path"], "existing_credentials_required")
+        self.assertEqual(result["auth_path"], "legacy_default_normalized")
 
 
 if __name__ == "__main__":

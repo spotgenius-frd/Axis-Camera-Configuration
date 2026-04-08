@@ -25,6 +25,7 @@ import type {
 } from "@/lib/camera-types";
 
 type InputWorkspaceProps = {
+  apiBase: string;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   activeTab: "manual" | "upload" | "scan";
@@ -49,8 +50,6 @@ type InputWorkspaceProps = {
   selectedScanIps: string[];
   scanInterfaceName: string;
   scanCidr: string;
-  scanFollowupUsername: string;
-  scanFollowupPassword: string;
   onAddRow: () => void;
   onUpdateRow: (id: string, field: keyof CameraRow, value: string) => void;
   onRemoveRow: (id: string) => void;
@@ -59,18 +58,21 @@ type InputWorkspaceProps = {
   onSubmitUpload: () => void;
   onScanInterfaceNameChange: (value: string) => void;
   onScanCidrChange: (value: string) => void;
-  onScanFollowupUsernameChange: (value: string) => void;
-  onScanFollowupPasswordChange: (value: string) => void;
+  onScanCredentialChange: (
+    ipAddress: string,
+    field: "username" | "password",
+    value: string,
+  ) => void;
   onToggleScannedDevice: (ip: string, checked: boolean) => void;
   onToggleAllScannedDevices: (checked: boolean) => void;
   onReloadScanOptions: () => void;
   onSubmitNetworkScan: () => void;
   onImportScannedDevices: () => void;
-  onStartScanSetup: (onboardingPassword: string) => Promise<boolean>;
-  onReadFlaggedScannedDevices: (username: string, password: string) => Promise<boolean>;
+  onStartScanSetup: (newRootPassword?: string) => Promise<boolean>;
 };
 
 export function InputWorkspace({
+  apiBase,
   collapsed,
   onCollapsedChange,
   activeTab,
@@ -95,8 +97,6 @@ export function InputWorkspace({
   selectedScanIps,
   scanInterfaceName,
   scanCidr,
-  scanFollowupUsername,
-  scanFollowupPassword,
   onAddRow,
   onUpdateRow,
   onRemoveRow,
@@ -105,18 +105,18 @@ export function InputWorkspace({
   onSubmitUpload,
   onScanInterfaceNameChange,
   onScanCidrChange,
-  onScanFollowupUsernameChange,
-  onScanFollowupPasswordChange,
+  onScanCredentialChange,
   onToggleScannedDevice,
   onToggleAllScannedDevices,
   onReloadScanOptions,
   onSubmitNetworkScan,
   onImportScannedDevices,
   onStartScanSetup,
-  onReadFlaggedScannedDevices,
 }: InputWorkspaceProps) {
+  const scanMode = activeTab === "scan";
+
   return (
-    <div className="space-y-4 2xl:sticky 2xl:top-6">
+    <div className={scanMode ? "space-y-4" : "space-y-4 2xl:sticky 2xl:top-6"}>
       <Card className="border-border/80 bg-card shadow-sm">
         <CardHeader className="space-y-3">
           <div className="flex items-center justify-between gap-3">
@@ -185,6 +185,7 @@ export function InputWorkspace({
             </TabsContent>
             <TabsContent value="scan">
               <NetworkScanPanel
+                apiBase={apiBase}
                 interfaceOptions={scanInterfaceOptions}
                 scanTarget={scanTarget}
                 devices={scanDevices}
@@ -193,22 +194,18 @@ export function InputWorkspace({
                 selectedDeviceIps={selectedScanIps}
                 interfaceName={scanInterfaceName}
                 cidr={scanCidr}
-                followupUsername={scanFollowupUsername}
-                followupPassword={scanFollowupPassword}
                 loadingOptions={isLoadingScanOptions}
                 scanBusy={isScanningNetwork}
                 importBusy={isImportingScanSelection}
                 onInterfaceNameChange={onScanInterfaceNameChange}
                 onCidrChange={onScanCidrChange}
-                onFollowupUsernameChange={onScanFollowupUsernameChange}
-                onFollowupPasswordChange={onScanFollowupPasswordChange}
+                onCredentialChange={onScanCredentialChange}
                 onToggleSelection={onToggleScannedDevice}
                 onToggleSelectAll={onToggleAllScannedDevices}
                 onReloadOptions={onReloadScanOptions}
                 onScan={onSubmitNetworkScan}
                 onAddSelected={onImportScannedDevices}
                 onStartSetup={onStartScanSetup}
-                onReadFlagged={onReadFlaggedScannedDevices}
               />
             </TabsContent>
           </Tabs>

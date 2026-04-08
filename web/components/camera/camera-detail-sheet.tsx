@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { CameraPreviewPanel } from "@/components/camera/camera-preview";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -56,9 +57,11 @@ import {
 import { getSupportedUsTimeZones } from "@/lib/us-time-zones";
 
 type CameraDetailSheetProps = {
+  apiBase: string;
   result: CameraResult | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  setupNotice?: string | null;
   busy: boolean;
   refreshInProgress?: boolean;
   lastWriteResult?: WriteResult | null;
@@ -122,9 +125,11 @@ type DetailTabValue =
   | "firmware";
 
 export function CameraDetailSheet({
+  apiBase,
   result,
   open,
   onOpenChange,
+  setupNotice,
   busy,
   refreshInProgress,
   lastWriteResult,
@@ -137,6 +142,15 @@ export function CameraDetailSheet({
   onRunFirmwareAction,
   onUploadFirmware,
 }: CameraDetailSheetProps) {
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open || !result) {
+      return;
+    }
+    scrollContainerRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [open, result]);
+
   if (!result) {
     return null;
   }
@@ -161,7 +175,18 @@ export function CameraDetailSheet({
           </SheetDescription>
         </SheetHeader>
 
-        <div className="flex-1 space-y-6 overflow-y-auto px-6 py-5">
+        <div ref={scrollContainerRef} className="flex-1 space-y-6 overflow-y-auto px-6 py-5">
+          {setupNotice && !result.error ? (
+            <div className="rounded-xl border border-emerald-300/60 bg-emerald-50/70 px-4 py-3 text-sm text-emerald-900 dark:border-emerald-900/60 dark:bg-emerald-950/20 dark:text-emerald-100">
+              <div className="flex items-start gap-3">
+                <CheckCircle2Icon className="mt-0.5 size-4 shrink-0 text-emerald-600" />
+                <div className="space-y-1">
+                  <p className="font-medium">Setup verified</p>
+                  <p>{setupNotice}</p>
+                </div>
+              </div>
+            </div>
+          ) : null}
           {result.error ? (
             <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive">
               {result.error}
@@ -169,6 +194,7 @@ export function CameraDetailSheet({
           ) : (
             <CameraDetailContent
               key={`${result.camera_ip}-${result.summary?.firmware ?? ""}-${result.summary?.model ?? ""}`}
+              apiBase={apiBase}
               result={result}
               busy={busy}
               lastWriteResult={lastWriteResult}
@@ -213,6 +239,7 @@ export function CameraDetailSheet({
 }
 
 function CameraDetailContent({
+  apiBase,
   result,
   busy,
   lastWriteResult,
@@ -226,6 +253,7 @@ function CameraDetailContent({
   onRunFirmwareAction,
   onUploadFirmware,
 }: {
+  apiBase: string;
   result: CameraResult;
   busy: boolean;
   lastWriteResult?: WriteResult | null;
@@ -903,6 +931,7 @@ function CameraDetailContent({
 
   return (
     <div className="space-y-6 pb-6">
+      <CameraPreviewPanel apiBase={apiBase} camera={camera} />
       <CompactOverview result={result} latestFirmwareVersion={latestFirmware?.version} />
       <Tabs
         value={activeTab}
