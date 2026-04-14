@@ -1,6 +1,6 @@
 # Axis Camera Configuration
 
-Version: `0.1.0`
+Version: `1.0.0`
 
 Axis Camera Configuration is a local-first toolkit for onboarding and configuring Axis IP cameras through Axis VAPIX APIs. It is designed for field and deployment workflows where an operator is on a customer site, connects to the same network as the cameras, discovers devices, applies credentials, changes network settings, and pushes the required SpotGenius camera configuration from one interface.
 
@@ -10,7 +10,7 @@ This project is **not hosted yet**. Today it runs locally as:
 - a FastAPI backend in `api/`
 - a Next.js web UI in `web/`
 
-## Current `v0.1.0` Capabilities
+## Current `v1.0.0` Capabilities
 
 - Manual camera entry by IP/hostname, username, password, and optional port
 - CSV/XLSX upload for batch reads

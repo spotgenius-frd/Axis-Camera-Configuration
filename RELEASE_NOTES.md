@@ -1,8 +1,8 @@
 # Release Notes
 
-## `v0.1.0`
+## `v1.0.0`
 
-Initial GitHub import of the Axis Camera Configuration project.
+First full release of the Axis Camera Configuration project.
 
 ### What this application is
 
@@ -13,9 +13,11 @@ Axis Camera Configuration is a local-first tool for SpotGenius field and deploym
 - Manual camera entry
 - CSV/XLSX batch upload
 - Camera readback for model, firmware, parameters, stream profiles, capability data, and firmware status
+- Strict read verification so invalid targets, bad IPs, and wrong credentials do not appear as successful reads
 - Bulk camera settings updates
 - Stream profile create, update, and remove
 - Firmware upload and firmware actions
+- Camera preview snapshots in list views and the detail sheet
 - Single-camera network configuration:
   - DHCP/static mode
   - IP address
@@ -25,7 +27,8 @@ Axis Camera Configuration is a local-first tool for SpotGenius field and deploym
   - hostname
 - Password change for the currently configured username
 - LAN scan / Axis device discovery on the same local network
-- Improved incorrect-credential handling in the UI and backend
+- Scan-based onboarding for first-time, legacy-default, and already-configured cameras
+- Improved incorrect-credential handling and clearer verification messaging in the UI and backend
 
 ### How this release is intended to be used
 
@@ -48,4 +51,3 @@ Typical use:
 - Bulk IP/hostname updates are not included in this release
 - Username rename is not included in this release
 - Tailscale access is useful for routed remote reachability, but it should not be treated as local broadcast discovery
-
